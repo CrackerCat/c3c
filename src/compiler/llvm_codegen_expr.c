@@ -228,6 +228,7 @@ LLVMValueRef gencontext_emit_address(GenContext *context, Expr *expr)
 		case EXPR_CT_IDENT:
 		case EXPR_MACRO_CT_IDENTIFIER:
 		case EXPR_MACRO_IDENTIFIER:
+		case EXPR_HASH_IDENT:
 			UNREACHABLE
 		case EXPR_DESIGNATED_INITIALIZER:
 			// Should only appear when generating designated initializers.
@@ -1942,6 +1943,7 @@ NESTED_RETRY:
 		case EXPR_MACRO_IDENTIFIER:
 		case EXPR_MACRO_CT_IDENTIFIER:
 		case EXPR_CT_IDENT:
+		case EXPR_HASH_IDENT:
 			UNREACHABLE
 		case EXPR_UNDEF:
 			// Should never reach this.

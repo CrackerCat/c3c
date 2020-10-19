@@ -25,7 +25,6 @@ static TypeInfo *type_info_copy_from_macro(Context *context, TypeInfo *source);
 #define MACRO_COPY_AST_LIST(x) x = ast_copy_list_from_macro(context, x)
 #define MACRO_COPY_AST(x) x = ast_copy_from_macro(context, x)
 
-bool sema_analyse_expr_may_be_function(Context *context, Expr *expr);
 static inline bool sema_expr_analyse_binary(Context *context, Type *to, Expr *expr);
 static inline bool sema_analyse_expr_value(Context *context, Type *to, Expr *expr);
 static inline bool expr_const_int_valid(Expr *expr, Type *type)
@@ -194,7 +193,8 @@ static inline bool sema_cast_ident_rvalue(Context *context, Type *to, Expr *expr
 			TODO
 		case VARDECL_PARAM_EXPR:
 			expr_replace(expr, expr_copy_from_macro(context, decl->var.init_expr));
-			return sema_analyse_expr(context, to, expr);
+			assert(decl->var.init_expr->resolve_status == RESOLVE_DONE);
+			return true;
 		case VARDECL_PARAM_CT_TYPE:
 			TODO
 		case VARDECL_PARAM:
@@ -633,6 +633,41 @@ static inline bool sema_expr_analyse_ct_identifier(Context *context, Type *to __
 	return true;
 }
 
+static inline bool sema_expr_analyse_hash_identifier(Context *context, Type *to __unused, Expr *expr)
+{
+	Decl *ambiguous_decl = NULL;
+	Decl *private_symbol = NULL;
+	expr->pure = true;
+
+	DEBUG_LOG("Now resolving %s", expr->hash_ident_expr.identifier);
+	Decl *decl = sema_resolve_symbol(context,
+	                                 expr->hash_ident_expr.identifier,
+	                                 NULL,
+	                                 &ambiguous_decl,
+	                                 &private_symbol);
+
+	assert(!ambiguous_decl && !private_symbol);
+	if (!decl)
+	{
+		SEMA_ERROR(expr, "Compile time variable '%s' could not be found.", expr->ct_ident_expr.identifier);
+		return false;
+	}
+
+	// Already handled
+	if (!decl_ok(decl))
+	{
+		return expr_poison(expr);
+	}
+
+	DEBUG_LOG("Resolution successful of %s.", decl->name);
+	assert(decl->decl_kind == DECL_VAR);
+	assert(decl->resolve_status == RESOLVE_DONE);
+
+	assert(decl->var.init_expr->resolve_status == RESOLVE_DONE);
+	expr_replace(expr, expr_copy_from_macro(context, decl->var.init_expr));
+	return sema_analyse_expr(context, to, expr);
+}
+
 static inline bool sema_expr_analyse_binary_sub_expr(Context *context, Type *to, Expr *left, Expr *right)
 {
 	return sema_analyse_expr(context, to, left) & sema_analyse_expr(context, to, right);
@@ -917,7 +952,12 @@ static inline bool sema_expr_analyse_macro_call(Context *context, Type *to, Expr
 				break;
 			case VARDECL_PARAM_EXPR:
 				// #foo
-				param->var.init_expr = arg;
+				// We push a scope here as this will prevent the expression from modifying
+				// compile time variables during evaluation:
+				context_push_scope(context);
+				bool ok = sema_analyse_expr_of_required_type(context, param->type, arg, false);
+				context_pop_scope(context);
+				if (!ok) return false;
 				break;
 			case VARDECL_PARAM_CT:
 				// $foo
@@ -939,16 +979,13 @@ static inline bool sema_expr_analyse_macro_call(Context *context, Type *to, Expr
 			case VARDECL_ALIAS:
 				UNREACHABLE
 		}
-		if (param->var.kind != VARDECL_PARAM_EXPR)
+		if (param->type)
 		{
-			if (param->type)
-			{
-				if (!cast_implicit(context, arg, param->type)) return false;
-			}
-			else
-			{
-				param->type = arg->type;
-			}
+			if (!cast_implicit(context, arg, param->type)) return false;
+		}
+		else
+		{
+			param->type = arg->type;
 		}
 		param->var.init_expr = arg;
 		param->resolve_status = RESOLVE_DONE;
@@ -2221,7 +2258,7 @@ static inline bool sema_expr_analyse_ct_identifier_lvalue(Context *context, Expr
 
 	if ((intptr_t)decl->var.scope < (intptr_t)context->current_scope)
 	{
-		SEMA_ERROR(expr, "Cannot modify '%s' inside of a deeper scope.", decl->name);
+		SEMA_ERROR(expr, "Cannot modify '%s' inside of a runtime scope.", decl->name);
 		return false;
 	}
 	expr->ct_ident_expr.decl = decl;
@@ -3938,6 +3975,7 @@ static Expr *expr_copy_from_macro(Context *context, Expr *source_expr)
 		case EXPR_MACRO_IDENTIFIER:
 		case EXPR_CT_IDENT:
 		case EXPR_MACRO_CT_IDENTIFIER:
+		case EXPR_HASH_IDENT:
 			// TODO
 			return expr;
 		case EXPR_TYPEINFO:
@@ -4078,6 +4116,7 @@ static TypeInfo** type_info_copy_list_from_macro(Context *context, TypeInfo **to
 
 static Ast *ast_copy_from_macro(Context *context, Ast *source)
 {
+	if (!source) return NULL;
 	Ast *ast = ast_shallow_copy(source);
 	switch (source->ast_kind)
 	{
@@ -4387,6 +4426,8 @@ static inline bool sema_analyse_expr_dispatch(Context *context, Type *to, Expr *
 		case EXPR_ENUM_CONSTANT:
 		case EXPR_MEMBER_ACCESS:
 			UNREACHABLE
+		case EXPR_HASH_IDENT:
+			return sema_expr_analyse_hash_identifier(context, to, expr);
 		case EXPR_MACRO_CT_IDENTIFIER:
 		case EXPR_CT_IDENT:
 			return sema_expr_analyse_ct_identifier(context, to, expr);
@@ -4482,7 +4523,7 @@ bool sema_analyse_expr_of_required_type(Context *context, Type *to, Expr *expr, 
 static inline bool sema_cast_ct_ident_rvalue(Context *context, Type *to, Expr *expr)
 {
 	Decl *decl = expr->ct_ident_expr.decl;
-	Expr *copy = MACRO_COPY_EXPR(decl->var.init_expr);
+	Expr *copy = expr_copy_from_macro(context, decl->var.init_expr);
 	if (!sema_analyse_expr(context, to, copy)) return false;
 	expr_replace(expr, copy);
 	return true;
@@ -4554,20 +4595,3 @@ bool sema_analyse_expr(Context *context, Type *to, Expr *expr)
 	return sema_analyse_expr_value(context, to, expr) && sema_cast_rvalue(context, to, expr);
 }
 
-bool sema_analyse_expr_may_be_function(Context *context, Expr *expr)
-{
-	switch (expr->resolve_status)
-	{
-		case RESOLVE_NOT_DONE:
-			expr->resolve_status = RESOLVE_RUNNING;
-			break;
-		case RESOLVE_RUNNING:
-			SEMA_ERROR(expr, "Recursive resolution of expression");
-			return expr_poison(expr);
-		case RESOLVE_DONE:
-			return expr_ok(expr);
-	}
-	if (!sema_analyse_expr_dispatch(context, NULL, expr)) return expr_poison(expr);
-	expr->resolve_status = RESOLVE_DONE;
-	return true;
-}

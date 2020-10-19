@@ -545,6 +545,10 @@ void fprint_expr_recursive(Context *context, FILE *file, Expr *expr, int indent)
 			DUMPF("(ctident %s", expr->ct_ident_expr.identifier);
 			DUMPEXPC(expr);
 			DUMPEND();
+		case EXPR_HASH_IDENT:
+			DUMPF("(hashident %s", expr->hash_ident_expr.identifier);
+			DUMPEXPC(expr);
+			DUMPEND();
 		case EXPR_MACRO_CT_IDENTIFIER:
 			DUMPF("(macroctident @%s", expr->ct_ident_expr.identifier);
 			DUMPEXPC(expr);

@@ -684,6 +684,7 @@ struct _Expr
 	bool failable : 1;
 	bool pure : 1;
 	bool constant : 1;
+	bool reeval : 1;
 	SourceSpan span;
 	Type *type;
 	union {
@@ -712,6 +713,7 @@ struct _Expr
 		ExprIdentifier macro_identifier_expr;
 		ExprIdentifierRaw ct_ident_expr;
 		ExprIdentifierRaw ct_macro_ident_expr;
+		ExprIdentifierRaw hash_ident_expr;
 		TypeInfo *typeid_expr;
 		ExprInitializer expr_initializer;
 		Decl *expr_enum;

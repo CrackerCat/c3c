@@ -306,6 +306,11 @@ bool fpxi(Context *context, Expr *left, Type *canonical, Type *type, CastType ca
  */
 bool ixxxi(Context *context, Expr *left, Type *canonical, Type *type, CastType cast_type)
 {
+	if (left->expr_kind != EXPR_CONST)
+	{
+		SEMA_ERROR(left, "This expression could not be resolved to a concrete type. Please add more type annotations.");
+		return false;
+	}
 	bool is_signed = canonical->type_kind < TYPE_U8;
 	int bitsize = canonical->builtin.bitsize;
 	if (!is_signed && bigint_cmp_zero(&left->const_expr.i) == CMP_LT)
@@ -787,6 +792,12 @@ bool cast(Context *context, Expr *expr, Type *to_type, CastType cast_type)
 			break;
 		case TYPE_IXX:
 			// Compile time integers may convert into ints, floats, bools
+			if (expr->expr_kind != EXPR_CONST && !expr->reeval)
+			{
+				expr->resolve_status = RESOLVE_NOT_DONE;
+				expr->reeval = true;
+				return sema_analyse_expr(context, to_type, expr);
+			}
 			if (type_is_integer(canonical)) return ixxxi(context, expr, canonical, to_type, cast_type);
 			if (type_is_float(canonical)) return ixxfp(context, expr, canonical, to_type, cast_type);
 			if (canonical == type_bool) return ixxbo(context, expr, to_type);
@@ -816,6 +827,13 @@ bool cast(Context *context, Expr *expr, Type *to_type, CastType cast_type)
 		case TYPE_F32:
 		case TYPE_F64:
 		case TYPE_FXX:
+			// Compile time integers may convert into ints, floats, bools
+			if (from_type->type_kind == TYPE_FXX && expr->expr_kind != EXPR_CONST && !expr->reeval)
+			{
+				expr->resolve_status = RESOLVE_NOT_DONE;
+				expr->reeval = true;
+				return sema_analyse_expr(context, to_type, expr);
+			}
 			if (type_is_integer(canonical)) return fpxi(context, expr, canonical, to_type, cast_type);
 			if (canonical == type_bool) return fpbo(context, expr, canonical, to_type, cast_type);
 			if (type_is_float(canonical)) return fpfp(context, expr, from_type, canonical, to_type, cast_type);
