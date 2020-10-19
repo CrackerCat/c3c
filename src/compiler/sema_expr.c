@@ -16,6 +16,7 @@ static Ast *ast_copy_from_macro(Context *context, Ast *source);
 static Ast **ast_copy_list_from_macro(Context *context, Ast **to_copy);
 static Decl *decl_copy_local_from_macro(Context *context, Decl *to_copy);
 static TypeInfo *type_info_copy_from_macro(Context *context, TypeInfo *source);
+static inline bool sema_cast_rvalue(Context *context, Type *to, Expr *expr);
 
 #define MACRO_COPY_DECL(x) x = decl_copy_local_from_macro(context, x)
 #define MACRO_COPY_EXPR(x) x = expr_copy_from_macro(context, x)
@@ -113,6 +114,7 @@ static bool expr_is_ltype(Expr *expr)
 				case VARDECL_LOCAL:
 				case VARDECL_GLOBAL:
 				case VARDECL_PARAM:
+				case VARDECL_PARAM_REF:
 					return true;
 				case VARDECL_CONST:
 				default:
@@ -189,14 +191,15 @@ static inline bool sema_cast_ident_rvalue(Context *context, Type *to, Expr *expr
 		case VARDECL_CONST:
 			expr_replace(expr, expr_copy_from_macro(context, decl->var.init_expr));
 			return sema_analyse_expr(context, to, expr);
-		case VARDECL_PARAM_REF:
-			TODO
 		case VARDECL_PARAM_EXPR:
 			expr_replace(expr, expr_copy_from_macro(context, decl->var.init_expr));
 			assert(decl->var.init_expr->resolve_status == RESOLVE_DONE);
 			return true;
 		case VARDECL_PARAM_CT_TYPE:
 			TODO
+		case VARDECL_PARAM_REF:
+			expr_replace(expr, expr_copy_from_macro(context, decl->var.init_expr));
+			return sema_cast_rvalue(context, to, expr);
 		case VARDECL_PARAM:
 		case VARDECL_GLOBAL:
 		case VARDECL_LOCAL:
@@ -1055,7 +1058,7 @@ static inline bool sema_expr_analyse_macro_call(Context *context, Type *to, Expr
 	}
 	call_expr->expr_kind = EXPR_MACRO_BLOCK;
 	call_expr->macro_block.stmts = body->compound_stmt.stmts;
-	call_expr->macro_block.params = func_params;
+	call_expr->macro_block.params = params;
 	call_expr->macro_block.args = args;
 	EXIT:
 	context_pop_scope(context);
@@ -3665,6 +3668,10 @@ static inline bool sema_expr_analyse_ct_incdec(Context *context, Expr *expr, Exp
 	return true;
 }
 
+/**
+ * Analyse foo++ foo-- --foo ++foo
+ * @return false if analysis fails.
+ */
 static inline bool sema_expr_analyse_incdec(Context *context, Expr *expr, Expr *inner)
 {
 	expr->constant = false;

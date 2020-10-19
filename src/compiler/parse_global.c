@@ -1433,6 +1433,9 @@ static inline Decl *parse_typedef_declaration(Context *context, Visibility visib
 	return decl;
 }
 
+/**
+ * macro ::= MACRO type? identifier '(' macro_params ')' compound_statement
+ */
 static inline Decl *parse_macro_declaration(Context *context, Visibility visibility)
 {
 	advance_and_verify(context, TOKEN_MACRO);
@@ -1464,7 +1467,7 @@ static inline Decl *parse_macro_declaration(Context *context, Visibility visibil
 			case TOKEN_CT_IDENT:
 				param_kind = VARDECL_PARAM_CT;
 				break;
-			case TOKEN_AND:
+			case TOKEN_AMP:
 				advance(context);
 				if (!TOKEN_IS(TOKEN_IDENT))
 				{

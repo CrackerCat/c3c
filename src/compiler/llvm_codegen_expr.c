@@ -1819,6 +1819,11 @@ static inline LLVMValueRef gencontext_emit_macro_block(GenContext *context, Expr
 			case VARDECL_ALIAS:
 				UNREACHABLE
 			case VARDECL_PARAM_REF:
+			{
+				LLVMValueRef addr = gencontext_emit_address(context, decl->var.init_expr);
+				decl->backend_ref = addr;
+				continue;
+			}
 			case VARDECL_PARAM_CT:
 			case VARDECL_PARAM_CT_TYPE:
 			case VARDECL_PARAM_EXPR:
