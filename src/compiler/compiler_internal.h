@@ -1079,6 +1079,7 @@ typedef struct _Context
 	Decl **types;
 	Decl **generic_defines;
 	Decl **functions;
+	Decl **macros;
 	Decl **methods;
 	Decl **vars;
 	Decl **incr_array;

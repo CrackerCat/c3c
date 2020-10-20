@@ -899,6 +899,7 @@ static bool sema_check_stmt_compile_time(Context *context, Ast *ast)
 			return false;
 	}
 }
+
 static inline bool sema_expr_analyse_macro_call(Context *context, Type *to, Expr *call_expr, Decl *decl)
 {
 	// TODO failable
@@ -972,7 +973,15 @@ static inline bool sema_expr_analyse_macro_call(Context *context, Type *to, Expr
 				}
 				break;
 			case VARDECL_PARAM_CT_TYPE:
-				TODO
+				// $Foo
+				if (!sema_analyse_expr_value(context, NULL, arg)) return false;
+				// TODO check typeof
+				if (arg->expr_kind != EXPR_TYPEINFO)
+				{
+					SEMA_ERROR(arg, "A type, like 'int' or 'double' was expected for the parameter '%s'.", param->name);
+					return false;
+				}
+				break;
 			case VARDECL_CONST:
 			case VARDECL_GLOBAL:
 			case VARDECL_LOCAL:

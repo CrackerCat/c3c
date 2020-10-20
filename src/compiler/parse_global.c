@@ -1461,27 +1461,39 @@ static inline Decl *parse_macro_declaration(Context *context, Visibility visibil
 		TEST_TYPE:
 		switch (context->tok.type)
 		{
+			// normal foo
 			case TOKEN_IDENT:
 				param_kind = VARDECL_PARAM;
 				break;
+			// ct_var $foo
 			case TOKEN_CT_IDENT:
 				param_kind = VARDECL_PARAM_CT;
 				break;
+			// reference &foo
 			case TOKEN_AMP:
 				advance(context);
 				if (!TOKEN_IS(TOKEN_IDENT))
 				{
 					SEMA_TOKEN_ERROR(context->tok, "Only normal variables may be passed by reference.");
+					return poisoned_decl;
 				}
 				param_kind = VARDECL_PARAM_REF;
 				break;
+			// #Foo (not allowed)
+			case TOKEN_HASH_TYPE_IDENT:
+				SEMA_TOKEN_ERROR(context->tok, "An unevaluated expression can never be a type, did you mean to use $Type?");
+				return poisoned_decl;
+			// expression #foo
 			case TOKEN_HASH_IDENT:
+				// Note that the HASH_TYPE_IDENT will be an error later on.
 				param_kind = VARDECL_PARAM_EXPR;
 				break;
-			case TOKEN_HASH_TYPE_IDENT:
-				param_kind = VARDECL_PARAM_EXPR;
+			// Compile time type $Type
+			case TOKEN_CT_TYPE_IDENT:
+				param_kind = VARDECL_PARAM_CT_TYPE;
 				break;
 			case TOKEN_ELLIPSIS:
+				// varargs
 				TODO
 			default:
 				if (parm_type)

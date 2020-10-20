@@ -552,8 +552,30 @@ static inline bool sema_analyse_macro(Context *context, Decl *decl)
 	{
 		Decl *param = decl->macro_decl.parameters[i];
 		assert(param->decl_kind == DECL_VAR);
-		assert(param->var.kind == VARDECL_PARAM);
-		if (param->var.type_info && !sema_resolve_type_info(context, param->var.type_info)) return false;
+		switch (param->var.kind)
+		{
+			case VARDECL_PARAM:
+			case VARDECL_PARAM_EXPR:
+			case VARDECL_PARAM_CT:
+			case VARDECL_PARAM_REF:
+				if (param->var.type_info && !sema_resolve_type_info(context, param->var.type_info)) return false;
+				break;
+			case VARDECL_PARAM_CT_TYPE:
+				if (param->var.type_info)
+				{
+					SEMA_ERROR(param->var.type_info, "A compile time type parameter cannot have a type itself.");
+					return false;
+				}
+				break;
+			case VARDECL_CONST:
+			case VARDECL_GLOBAL:
+			case VARDECL_LOCAL:
+			case VARDECL_MEMBER:
+			case VARDECL_LOCAL_CT:
+			case VARDECL_LOCAL_CT_TYPE:
+			case VARDECL_ALIAS:
+				UNREACHABLE
+		}
 	}
 	return true;
 }
