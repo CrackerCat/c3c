@@ -75,6 +75,14 @@ typedef struct
 	bool current_block_is_target : 1;
 	bool did_call_stack_save : 1;
 	LLVMTypeRef type_data_definitions[TYPE_KINDS];
+	struct
+	{
+		unsigned int_registers;
+		unsigned sse_registers;
+		unsigned simd_registers;
+		int args;
+		CallConvention call_convention;
+	} abi;
 } GenContext;
 
 extern unsigned sadd_overflow_intrinsic_id;
@@ -129,6 +137,7 @@ void gencontext_emit_debug_location(GenContext *context, SourceSpan location);
 void gencontext_debug_push_lexical_scope(GenContext *context, SourceSpan location);
 void gencontext_push_debug_scope(GenContext *context, LLVMMetadataRef debug_scope);
 void gencontext_pop_debug_scope(GenContext *context);
+void c_abi_func_create_x86(GenContext *context, FunctionSignature *signature);
 
 LLVMMetadataRef gencontext_create_builtin_debug_type(GenContext *context, Type *builtin_type);
 LLVMValueRef gencontext_emit_alloca(GenContext *context, LLVMTypeRef type, const char *name);

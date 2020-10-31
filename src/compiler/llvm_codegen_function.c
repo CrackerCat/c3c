@@ -303,6 +303,7 @@ void gencontext_emit_function_decl(GenContext *context, Decl *decl)
 		                                                      build_options.optimization_level != OPTIMIZATION_NONE);
 		LLVMSetSubprogram(function, context->debug.function);
 	}
+	c_abi_func_create_x86(context, &decl->func.function_signature);
 }
 
 
@@ -339,3 +340,413 @@ void gencontext_emit_extern_decl(GenContext *context, Decl *decl)
 	}
 }
 
+/*
+typedef enum
+{
+	CABI_ATTRIBUTE_NONE,
+	CABI_ATTRIBUTE_SRETURN,
+	CABI_ATTRIBUTE_NEST,
+	CABI_ATTRIBUTE_BY_VAL,
+} CABIAttribute;
+
+typedef enum
+{
+	LLVM_ARG_EMPTY,
+	LLVM_ARG_SSE,
+	LLVM_ARG_SIMD,
+	LLVM_ARG_INT,
+} LLVMArgCategory;
+
+typedef struct
+{
+	LLVMTypeRef direct_type;
+	CABIAttribute attribute;
+	Type** types;
+} EightByteChunk;
+
+typedef struct
+{
+
+} FunctionArgumentRules;
+
+typedef enum
+{
+	PASS_DIRECT,
+	PASS_IGNORE,
+	PASS_INDIRECT,
+} FunctionArgPassing;
+
+
+typedef struct
+{
+	union
+	{
+		LLVMTypeRef type;
+		LLVMTypeRef *types;
+	};
+	FunctionArgPassing passing;
+	CABIAttribute attribute;
+	int offset;
+} CABIParamInfo;
+
+static LLVMArgCategory function_arg_common(EightByteChunk* chunk)
+{
+	LLVMArgCategory category = LLVM_ARG_EMPTY;
+	VECEACH(chunk->types, i)
+	{
+		Type *t = chunk->types[i];
+		category = display_meet(type_display(t), category);
+	}
+	return category;
+}
+
+static inline CABIParamInfo cabi_param(LLVMTypeRef type, FunctionArgPassing passing, CABIAttribute attribute, int offset)
+{
+	return (CABIParamInfo) { .type = type, .passing = passing, .attribute = attribute, .offset = offset };
+}
+static inline CABIParamInfo cabi_param_ignored()
+{
+	return cabi_param(NULL, PASS_IGNORE, CABI_ATTRIBUTE_NONE, -1);
+}
+
+static inline CABIParamInfo cabi_params(LLVMTypeRef *types, FunctionArgPassing passing, CABIAttribute attribute, int offset)
+{
+	return (CABIParamInfo) { .types = types, .passing = passing, .attribute = attribute, .offset = offset };
+}
+
+typedef struct
+{
+	int number;
+	LLVMTypeRef type;
+} HFAInfo;
+
+
+				case llvm::CallingConv::X86_64_SysV:
+					availIntRegs_ = 6;
+					availSSERegs_ = 8;
+					break;
+				case llvm::CallingConv::ARM_AAPCS:
+					availIntRegs_ = 8;
+					availSIMDFPRegs_ = 8;
+					break;
+				default:
+					llvm::errs() << "unsupported llvm::CallingConv::ID " << cconv << "\n";
+					break;
+			}
+		}
+		void addDirectIntArg() {
+			if (availIntRegs_)
+				availIntRegs_ -= 1;
+			argCount_ += 1;
+		}
+		void addDirectSSEArg() {
+			if (availSSERegs_)
+				availSSERegs_ -= 1;
+			argCount_ += 1;
+		}
+		// For ARM_AAPCS HFA, one argument may takes multiple registers.
+		void addDirectSIMDFPArg(unsigned sr = 1) {
+			unsigned t = availSIMDFPRegs_ - sr;
+			if (availSIMDFPRegs_ > t)
+				availSIMDFPRegs_ = t;
+			argCount_ += 1;
+		}
+		void addIndirectArg() { argCount_ += 1; }
+		void addIndirectReturn() {
+			if (availIntRegs_)
+				availIntRegs_ -= 1;
+			argCount_ += 1;
+		}
+		// ARM_AAPCS uses separate x8 to store return address.
+		void addIndirectReturnForARM_AAPCS() { argCount_ += 1; }
+		void addChainArg() { argCount_ += 1; }
+		unsigned argCount() const { return argCount_; }
+		unsigned availIntRegs() const { return availIntRegs_; }
+		unsigned availSSERegs() const { return availSSERegs_; }
+		unsigned availSIMDFPRegs() const { return availSIMDFPRegs_; }
+		void clearAvailIntRegs() { availIntRegs_ = 0; }
+		void clearAvailSIMDFPRegs() { availSIMDFPRegs_ = 0; }
+		private:
+		unsigned availIntRegs_;
+		unsigned availSSERegs_;
+		unsigned availSIMDFPRegs_;
+		unsigned argCount_;
+};*//*
+
+
+static EightByteChunk** func_arg_analyze_argument(GenContext *context, Type *type, HFAInfo *info)
+{
+	TODO
+	return NULL;
+}
+
+static inline FunctionArgPassing func_arg_analyse_passing_x64(Type *type)
+{
+	unsigned size = type == type_void ? 0 : type_size(type);
+	if (size == 0) return PASS_IGNORE;
+	return size > 16 ? PASS_INDIRECT : PASS_DIRECT;
+}
+
+static inline CABIParamInfo func_arg_analyze_return_x64(GenContext *context, Type *type)
+{
+	switch (func_arg_analyse_passing_x64(type))
+	{
+		case PASS_IGNORE:
+			return cabi_param_ignored();
+		case PASS_INDIRECT:
+			// Pass by ref
+			if (context->abi.int_registers) context->abi.int_registers--;
+			context->abi.args++;
+			return cabi_param(llvm_type(type_get_ptr(type)), PASS_INDIRECT, CABI_ATTRIBUTE_SRETURN, 0);
+		case PASS_DIRECT:
+		{
+			HFAInfo info;
+			EightByteChunk** chunks = func_arg_analyze_argument(context, type, &info);
+			switch (vec_size(chunks))
+			{
+				case 1:
+					return cabi_param(chunks[0]->direct_type, PASS_DIRECT, chunks[0]->attribute, -1);
+				case 2:
+				{
+					LLVMTypeRef types[2] = { chunks[0]->direct_type, chunks[1]->direct_type };
+					LLVMTypeRef abi_type = LLVMStructTypeInContext(context->context, types, 2, false);
+					return cabi_param(abi_type, PASS_DIRECT, CABI_ATTRIBUTE_NONE, -1);
+				}
+				default:
+					UNREACHABLE
+			}
+		}
+	}
+}
+
+static void func_arg_add_indirect_return_arm_aapcs(FunctionArgumentRules *rules)
+{
+	TODO
+}
+
+static void func_arg_get_register_requirements_x64(EightByteChunk **chunks, unsigned *int_regs, unsigned *sse_regs)
+{
+	*int_regs = 0;
+	*sse_regs = 0;
+	VECEACH(chunks, i)
+	{
+		EightByteChunk *chunk = chunks[i];
+		if (chunks->getRegionTypDisp() == LLVM_ARG_SSE)
+		{
+			*sse_regs += 1;
+		}
+		else
+		{
+			*int_regs += 1;
+		}
+	}
+}
+
+static inline bool func_arg_can_pass_directly_x64(GenContext *context, unsigned int_regs, unsigned sse_regs)
+{
+	if (int_regs + sse_regs == 1) return true;
+	return int_regs <= context->abi.int_registers && sse_regs <= context->abi.sse_registers;
+}
+
+static CABIParamInfo func_arg_analyze_abi_param_x64(GenContext *context, Type *type)
+{
+	*/
+/*
+	 * 	assert(paramType->flavor() != Btype::AuxT || ptyp->isVoidTy() ||
+		       !(ptyp->isStructTy() || ptyp->isArrayTy() || ptyp->isVectorTy() ||
+		         ptyp->isEmptyTy() || ptyp->isIntegerTy(8) || ptyp->isIntegerTy(16)));
+
+	 *//*
+
+	int sig_offset = context->abi.args;
+	switch (func_arg_analyse_passing_x64(type))
+	{
+		case PASS_IGNORE:
+			return cabi_param_ignored();
+		case PASS_INDIRECT:
+			// Pass in memory on the stack
+			if (context->abi.int_registers) context->abi.int_registers--;
+			context->abi.args++;
+			return cabi_param(llvm_type(type_get_ptr(type)), PASS_INDIRECT, CABI_ATTRIBUTE_BY_VAL, sig_offset);
+		case PASS_DIRECT:
+			break;
+		default:
+			UNREACHABLE
+	}
+	HFAInfo info;
+	EightByteChunk** chunks = func_arg_analyze_argument(context, type, &info);
+	// Figure out how many registers it would take to pass this parm directly
+	unsigned int_regs = 0;
+	unsigned sse_regs = 0;
+	func_arg_get_register_requirements_x64(chunks, &int_regs, &sse_regs);
+	// Make direct/indirect decision
+	CABIAttribute attr = CABI_ATTRIBUTE_NONE;
+	if (func_arg_can_pass_directly_x64(context, int_regs, sse_regs))
+	{
+		LLVMTypeRef *types = NULL;
+		VECEACH(chunks, i)
+		{
+			EightByteChunk *chunk = chunks[i];
+			vec_add(types, chunk->direct_type);
+			if (chunk->attribute != ATTRIBUTE_NONE)
+			{
+				attr == chunk->attribute;
+			}
+			if (chunk->region_type == LLVM_ARG_SSE)
+			{
+				if (context->abi.sse_registers) context->abi.sse_registers--;
+				context->abi.args++;
+			}
+			else
+			{
+				if (context->abi.int_registers) context->abi.int_registers--;
+				context->abi.int_registers++;
+			}
+		}
+		return cabi_params(types, PASS_DIRECT, attr, sig_offset);
+	}
+
+	context->abi.args++;
+	return cabi_param(llvm_type(type_get_ptr(type)), PASS_INDIRECT, CABI_ATTRIBUTE_BY_VAL, sig_offset);
+}
+
+static void func_arg_analyze_abi_param(GenContext *context, Type *type)
+{
+	if (build_target.arch == ARCH_TYPE_X86_64 && build_target.os != OS_TYPE_WIN32)
+	{
+		func_arg_analyze_abi_param_x64(context, type);
+	}
+	TODO
+}
+
+static inline CABIParamInfo func_arg_analyze_return_arm_aapcs(GenContext *context, FunctionArgumentRules *rules, Type *type)
+{
+	unsigned size = type == type_void ? 0 : type_size(type);
+	if (size == 0) return cabi_param(llvm_type(type_void), PASS_IGNORE, CABI_ATTRIBUTE_NONE, -1);
+	// Right now we don't have any float > 64 bits:
+	if (size > 32)
+	{
+		// Add indirect return
+		context->abi.args++;
+		return cabi_param(llvm_type(type_get_ptr(type)), PASS_INDIRECT, CABI_ATTRIBUTE_SRETURN, 0);
+	}
+	HFAInfo info;
+	EightByteChunk** chunks = func_arg_analyze_argument(context, type, &info);
+	switch (info.number)
+	{
+		case 0:
+			break;
+		case 1:
+			return cabi_param(info.type, PASS_DIRECT, CABI_ATTRIBUTE_NONE, -1);
+		default:
+		{
+			LLVMTypeRef *types = malloc_arena(sizeof(LLVMTypeRef) * info.number);
+			for (int i = 0; i < info.number; i++) types[i] = info.type;
+			LLVMTypeRef abi_type = LLVMStructTypeInContext(context->context, types, info.number, false);
+			return cabi_param(abi_type, PASS_DIRECT, CABI_ATTRIBUTE_NONE, -1);
+		}
+	}
+	// The return value is not an HFA and its size exceeds 16 bytes,
+	// be passed in memory, via a hidden struct return param.
+	if (size > 16)
+	{
+		context->abi.args++;
+		return cabi_param(llvm_type(type_get_ptr(type)), PASS_INDIRECT, CABI_ATTRIBUTE_SRETURN, 0);
+	}
+	switch (vec_size(chunks))
+	{
+		case 1:
+			return cabi_param(chunks[0]->direct_type, PASS_DIRECT, chunks[0]->attribute, -1);
+		case 2:
+		{
+			LLVMTypeRef types[2] = { chunks[0]->direct_type, chunks[1]->direct_type };
+			LLVMTypeRef abi_type = LLVMStructTypeInContext(context->context, types, 2, false);
+			return cabi_param(abi_type, PASS_DIRECT, CABI_ATTRIBUTE_NONE, -1);
+		}
+		default:
+			UNREACHABLE
+	}
+}
+
+*/
+/**
+ * CABIParamInfo CABIOracleARM_AAPCS::analyzeABIReturn(Btype *resultType,
+
+
+  // Direct case
+  auto &regions = ebi.regions();
+  if (regions.size() == 1) {
+    // Single value
+    return CABIParamInfo(regions[0].abiDirectType, ParmDirect, regions[0].attr,
+                         -1);
+  }
+  // Two-element struct
+  assert(regions.size() == 2);
+  llvm::Type *abiTyp = tm_->makeLLVMTwoElementStructType(
+      regions[0].abiDirectType, regions[1].abiDirectType);
+  return CABIParamInfo(abiTyp, ParmDirect, AttrNone, -1);
+}
+ * @param context
+ * @param signature
+ * @param rules
+ *//*
+
+void func_arg_create_c_abi(GenContext *context, FunctionSignature *signature, FunctionArgumentRules *rules)
+{
+	CABIParamInfo return_param;
+
+	context->abi.args = 0;
+	CABIParamInfo* params = NULL;
+	switch (build_target.arch)
+	{
+		case ARCH_TYPE_X86_64:
+			if (build_target.os == OS_TYPE_WIN32) TODO
+			context->abi.int_registers = 6;
+			context->abi.simd_registers = 0;
+			context->abi.sse_registers = 8;
+			vec_add(params, func_arg_analyze_return_x64(context, signature->rtype->type));
+			break;
+		default:
+			context->abi.int_registers = 8;
+			context->abi.simd_registers = 8;
+			context->abi.sse_registers = 0;
+			vec_add(params, func_arg_analyze_return_arm_aapcs(context, rules, signature->rtype->type));
+			break;
+	}
+
+	int sig_offset = context->abi.args;
+	context->abi.args++;
+	vec_add(params, cabi_param(llvm_type(type_voidptr), PASS_DIRECT, CABI_ATTRIBUTE_NEST, sig_offset));
+
+	// Now process the params.
+	unsigned num_params = vec_size(signature->params);
+	for (unsigned i = 0; i < num_params; i++)
+	{
+		Type *type = signature->params[i]->type;
+		vec_add(params, func_arg_analyze_abi_param(context, type));
+	}
+	LLVMTypeRef *types = NULL;
+	LLVMTypeRef return_type = NULL;
+	if (params[0].passing == PASS_INDIRECT)
+	{
+		return_type = llvm_type(type_void);
+		vec_add(types, params[0].type);
+	}
+	else
+	{
+		return_type = params[0].type;
+	}
+	unsigned expanded_parameters = vec_size(params);
+	for (unsigned i = 1; i < expanded_parameters; i++)
+	{
+		if (params[i].passing == PASS_IGNORE) continue;
+		TODO
+		*/
+/*
+		 *     for (auto &abit : infov_[pidx].abiTypes())
+      elems.push_back(abit);
+		*//*
+
+	}
+
+}*/

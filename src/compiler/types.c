@@ -215,6 +215,194 @@ const char *type_generate_qname(Type *type)
 	return strformat("%s::%s", type->decl->module->name->module, type->name);
 }
 
+static inline bool type_is_homogenous_aggregate_small_enough(Type *type, unsigned members)
+{
+	switch (build_target.arch)
+	{
+		case ARCH_TYPE_X86:
+		case ARCH_TYPE_X86_64:
+		case ARCH_TYPE_ARM:
+		case ARCH_TYPE_THUMB:
+		case ARCH_TYPE_ARMB:
+		case ARCH_TYPE_THUMBEB:
+		case ARCH_TYPE_AARCH64:
+		case ARCH_TYPE_AARCH64_32:
+		case ARCH_TYPE_AARCH64_BE:
+			return  members <= 4;
+		case ARCH_TYPE_PPC64:
+		case ARCH_TYPE_PPC64LE:
+		{
+			// If is float128 & has float => 1 reg TODO if float128
+			// If is vector => 1 reg
+			unsigned regs = type_is_vector(type) ? 1 : (type_size(type) + 63) / 64;
+			// Homogeneous Aggregates may occupy at most 8 registers.
+			return members * regs <= 8;
+		}
+		default:
+			return false;
+	}
+}
+
+bool type_is_empty(Type *type)
+{
+	switch (type->type_kind)
+	{
+		case TYPE_UNION:
+		case TYPE_STRUCT:
+			return vec_size(type->decl->strukt.members) == 0;
+		case TYPE_ARRAY:
+			return type->array.len == 0;
+		default:
+			return false;
+	}
+}
+Type *type_find_single_element(Type *type)
+{
+	if (!type_is_structlike(type)) return NULL;
+	Type *found = NULL;
+	Decl **members = type->decl->strukt.members;
+	VECEACH(members, i)
+	{
+		Type *member_type = members[i]->type->canonical;
+		if (type_is_empty(member_type)) continue;
+		if (found) return NULL;
+		// Collapse array
+		while (member_type->type_kind == TYPE_ARRAY && member_type->array.len == 1)
+		{
+			member_type = member_type->array.base;
+		}
+		if (type_is_structlike(member_type))
+		{
+			member_type = type_find_single_element(type);
+			if (!member_type) return NULL;
+		}
+		found = member_type->canonical;
+	}
+	// If there is some padding? Then ignore.
+	if (found && type_size(type) != type_size(found)) found = NULL;
+	return found;
+}
+
+bool type_is_aggregate(Type *type)
+{
+	switch (type->type_kind)
+	{
+		case TYPE_POISONED:
+			return false;
+		case TYPE_TYPEDEF:
+			return type_is_aggregate(type->canonical);
+		case ALL_FLOATS:
+		case TYPE_VOID:
+		case ALL_INTS:
+		case TYPE_BOOL:
+		case TYPE_VARARRAY:
+		case TYPE_TYPEID:
+		case TYPE_POINTER:
+		case TYPE_ENUM:
+		case TYPE_FUNC:
+			return false;
+		case TYPE_STRUCT:
+		case TYPE_UNION:
+		case TYPE_SUBARRAY:
+		case TYPE_ARRAY:
+		case TYPE_STRING:
+		case TYPE_ERR_UNION:
+		case TYPE_ERRTYPE:
+			return true;
+		case TYPE_TYPEINFO:
+		case TYPE_MEMBER:
+			UNREACHABLE
+	}
+	UNREACHABLE
+}
+bool type_is_homogenous_base_type(Type *type)
+{
+	// TODO vector
+	return true;
+}
+
+bool type_is_homogenous_aggregate(Type *type, Type **base, unsigned *elements)
+{
+	*elements = 0;
+	switch (type->type_kind)
+	{
+		case TYPE_FXX:
+		case TYPE_POISONED:
+		case TYPE_IXX:
+		case TYPE_VOID:
+		case TYPE_TYPEINFO:
+		case TYPE_MEMBER:
+		case TYPE_ERR_UNION:
+		case TYPE_TYPEID:
+		case TYPE_FUNC:
+		case TYPE_STRING:
+		case TYPE_SUBARRAY:
+			return false;
+		case TYPE_TYPEDEF:
+			return type_is_homogenous_aggregate(type->canonical, base, elements);
+		case TYPE_ERRTYPE:
+		case TYPE_STRUCT:
+		case TYPE_UNION:
+			*elements = 0;
+			{
+				Decl **members = type->decl->strukt.members;
+				VECEACH(members, i)
+				{
+					Type *member_type = members[i]->type;
+					unsigned member_members = 0;
+					if (!type_is_homogenous_aggregate(member_type, base, &member_members)) return false;
+					if (type->type_kind == TYPE_UNION)
+					{
+						*elements = MAX(*elements, member_members);
+					}
+					else
+					{
+						*elements += member_members;
+					}
+				}
+				// Ensure no padding
+				if (type_size(*base) * *elements != type_size(type)) return false;
+			}
+			goto TYPECHECK;
+		case TYPE_ARRAY:
+			if (type->array.len == 0) return false;
+			if (!type_is_homogenous_aggregate(type->array.base, base, elements)) return false;
+			*elements *= type->array.len;
+			goto TYPECHECK;
+		case TYPE_ENUM:
+			// Lower enum to underlying type
+			type = type->decl->enums.type_info->type;
+			break;
+		case TYPE_BOOL:
+			// Lower bool to unsigned char
+			type = type_byte;
+			break;
+		case TYPE_I8:
+		case TYPE_I16:
+		case TYPE_I32:
+		case TYPE_I64:
+			// Lower signed to unsigned
+			type = type_unsigned_int_by_bitsize(type->builtin.bytesize);
+			break;
+		case TYPE_U8:
+		case TYPE_U16:
+		case TYPE_U32:
+		case TYPE_U64:
+		case TYPE_F32:
+		case TYPE_F64:
+			break;
+		case TYPE_POINTER:
+		case TYPE_VARARRAY:
+			// All pointers are the same.
+			type = type_voidptr;
+			break;
+	}
+	if (!type_is_homogenous_base_type(type)) return false;
+
+	TYPECHECK:
+	if (*elements == 0) return false;
+	return type_is_homogenous_aggregate_small_enough(type, *elements);
+}
 unsigned int type_abi_alignment(Type *type)
 {
 	switch (type->type_kind)

@@ -146,6 +146,7 @@ LLVMTypeRef llvm_func_type(LLVMContextRef context, Type *type)
 			params[index++] = llvm_get_type(context, signature->params[i]->type->canonical);
 		}
 	}
+
 	LLVMTypeRef ret_type;
 	if (signature->failable)
 	{

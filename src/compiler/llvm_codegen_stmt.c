@@ -38,7 +38,7 @@ static LLVMValueRef gencontext_emit_decl(GenContext *context, Ast *ast)
 {
 	Decl *decl = ast->declare_stmt;
 
-	LLVMTypeRef alloc_type = llvm_type(type_reduced(decl->type));
+	LLVMTypeRef alloc_type = llvm_type(type_lowering(decl->type));
 	decl->backend_ref = gencontext_emit_alloca(context, alloc_type, decl->name);
 	if (decl->var.failable)
 	{

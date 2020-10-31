@@ -431,6 +431,7 @@ typedef struct _Decl
 	bool is_packed : 1;
 	bool has_addr : 1;
 	void *backend_ref;
+	void *abi_ref;
 	const char *cname;
 	uint32_t alignment;
 	const char *section;
@@ -1440,7 +1441,7 @@ void stable_clear(STable *table);
 
 const char *symtab_add(const char *symbol, uint32_t len, uint32_t fnv1hash, TokenType *type);
 
-void target_setup();
+void target_setup(void);
 int target_alloca_addr_space();
 void *target_data_layout();
 void *target_machine();
@@ -1479,7 +1480,11 @@ static inline bool type_is_signed(Type *type) { return type->type_kind >= TYPE_I
 static inline bool type_is_unsigned(Type *type) { return type->type_kind >= TYPE_U8 && type->type_kind <= TYPE_U64; }
 static inline bool type_ok(Type *type) { return !type || type->type_kind != TYPE_POISONED; }
 static inline bool type_info_ok(TypeInfo *type_info) { return !type_info || type_info->kind != TYPE_INFO_POISON; }
+bool type_is_aggregate(Type *type);
+bool type_is_homogenous_aggregate(Type *type, Type **base, unsigned *elements);
 bool type_may_have_sub_elements(Type *type);
+Type *type_find_single_element(Type *type);
+bool type_is_empty(Type *type);
 static inline bool type_kind_is_derived(TypeKind kind)
 {
 	switch (kind)
@@ -1494,11 +1499,21 @@ static inline bool type_kind_is_derived(TypeKind kind)
 	}
 }
 
-static inline Type *type_reduced(Type *type)
+static inline Type *type_lowering(Type *type)
 {
 	Type *canonical = type->canonical;
 	if (canonical->type_kind == TYPE_ENUM) return canonical->decl->enums.type_info->type->canonical;
 	return canonical;
+}
+
+static inline bool type_is_vector(Type *type)
+{
+	return false;
+}
+
+static inline bool type_is_structlike_with_vector(Type *type)
+{
+	return false;
 }
 
 static inline bool type_is_structlike(Type *type)
@@ -1518,7 +1533,7 @@ static inline bool type_is_structlike(Type *type)
 
 static inline Type *type_reduced_from_expr(Expr *expr)
 {
-	return type_reduced(expr->type);
+	return type_lowering(expr->type);
 }
 
 
@@ -1569,6 +1584,11 @@ static inline bool type_is_ct(Type *type)
 				return false;
 		}
 	}
+}
+
+static inline bool type_is_pointer(Type *type)
+{
+	return type->type_kind == TYPE_POINTER || type->type_kind == TYPE_ARRAY || type->type_kind == TYPE_VARARRAY;
 }
 
 static inline bool type_is_float(Type *type)

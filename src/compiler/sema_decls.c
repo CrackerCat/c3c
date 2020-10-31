@@ -212,10 +212,24 @@ static inline Type *sema_analyse_function_signature(Context *context, FunctionSi
 	if (return_type->type_kind != TYPE_VOID)
 	{
 		// TODO fix this number with ABI compatibility
-		if (signature->failable || type_size(return_type) > 8 * 2)
+		if (signature->failable || build_target.max_size_for_return == 0 || type_size(return_type) > build_target.max_size_for_return)
 		{
 			signature->return_param = true;
 		}
+		// x64 =>
+		// 1. First classify the arguments "int" "sse" "x87" and so on. And we have high and low version.
+		// 2. Extend those parameters correctly when passed in registers
+		// 3. float + i32 => i64
+		//    double + i32 => double, i32
+		//    float + float => 2 x float
+		//    double + double => double, double
+		//    any int <= i32 + float => i64
+		//    any ints total < 64 + double => i64 + double
+		//    byte + byte + short + short => i48
+		//    double + byte + byte + short + short => double + i64
+		//    float + float + byte + byte + short => 2 x float + i32
+		//    float + float + byte + byte + short + short => 2 x float + i64
+
 	}
 
 	TokenType type = TOKEN_INVALID_TOKEN;
