@@ -50,6 +50,8 @@ void gencontext_emit_br(GenContext *context, LLVMBasicBlockRef next_block)
 	LLVMBuildBr(context->builder, next_block);
 }
 
+
+
 void gencontext_emit_cond_br(GenContext *context, LLVMValueRef value, LLVMBasicBlockRef thenBlock, LLVMBasicBlockRef elseBlock)
 {
 	assert(context->current_block);
@@ -69,14 +71,143 @@ void gencontext_emit_block(GenContext *context, LLVMBasicBlockRef next_block)
 	context->current_block_is_target = false;
 }
 
+static void gencontext_expand_from_args(GenContext *context, Type *type, LLVMValueRef ref, unsigned *index)
+{
+	switch (type->type_kind)
+	{
+		case TYPE_ARRAY:
+			for (unsigned i = 0; i < type->array.len; i++)
+			{
+				LLVMValueRef indices[2] = { gencontext_emit_const_int(context, type_uint, 0), gencontext_emit_const_int(context, type_uint, i) };
+				LLVMValueRef target = LLVMBuildInBoundsGEP2(context->builder, llvm_type(type), ref, indices, 2, "");
+				LLVMValueRef cast_addr = gencontext_emit_bitcast(context, target, type_get_ptr(type->array.base));
+				gencontext_expand_from_args(context, type->array.base, cast_addr, index);
+			}
+			return;
+		case TYPE_STRUCT:
+		{
+			Decl **members = type->decl->strukt.members;
+			VECEACH(members, i)
+			{
+				LLVMValueRef indices[2] = { gencontext_emit_const_int(context, type_uint, 0), gencontext_emit_const_int(context, type_uint, i) };
+				LLVMValueRef target = LLVMBuildInBoundsGEP2(context->builder, llvm_type(type), ref, indices, 2, "");
+				LLVMValueRef cast_addr = gencontext_emit_bitcast(context, target, type_get_ptr(members[i]->type));
+				gencontext_expand_from_args(context, members[i]->type, cast_addr, index);
+			}
+			return;
+		}
+		case TYPE_UNION:
+			/*
+			 * 			auto largestSize = DataSize::Zero();
+			Type largestType = VoidTy;
 
-static inline void gencontext_emit_parameter(GenContext *context, Decl *decl, unsigned index)
+			for (const auto field: type.unionMembers()) {
+				// Skip zero length bitfields.
+				if (field.isBitField() &&
+				    field.bitFieldWidth().asBits() == 0) {
+					continue;
+				}
+				assert(!field.isBitField() &&
+				       "Cannot expand structure with bit-field members.");
+				const auto fieldSize = typeInfo.getTypeAllocSize(field.type());
+				if (largestSize < fieldSize) {
+					largestSize = fieldSize;
+					largestType = field.type();
+				}
+			}
+
+			if (largestType == VoidTy) {
+				return;
+			}
+
+			const auto irType = typeInfo.getLLVMType(largestType);
+			const auto castAddress = builder.getBuilder().CreateBitCast(alloca,
+			                                                            irType->getPointerTo());
+			expandTypeFromArgs(typeInfo, builder, largestType,
+			                   castAddress, iterator);
+			 */
+			TODO
+		default:
+			LLVMBuildStore(context->builder, LLVMGetParam(context->function, (*index)++), ref);
+			return;
+
+	}
+}
+
+static LLVMValueRef gencontext_get_next_parameter(GenContext *context, unsigned *index)
+{
+	return LLVMGetParam(context->function, (*index)++);
+}
+
+
+static inline void gencontext_emit_parameter(GenContext *context, Decl *decl, unsigned *index)
 {
 	assert(decl->decl_kind == DECL_VAR && decl->var.kind == VARDECL_PARAM);
 
-	// Allocate room on stack and copy.
+	ABIArgInfo *info = decl->var.abi_info;
 	const char *name = decl->name ? decl->name : "anon";
-	decl->backend_ref = gencontext_emit_alloca(context, llvm_type(decl->type), name);
+	switch (info->kind)
+	{
+		case ABI_ARG_IGNORE:
+			// Allocate room on stack, but do not copy.
+			decl->backend_ref = gencontext_emit_decl_alloca(context, decl);
+			break;
+		case ABI_ARG_DIRECT_INT_EXTEND:
+		case ABI_ARG_DIRECT_HVA:
+		case ABI_ARG_DIRECT:
+			decl->backend_ref = gencontext_emit_decl_alloca(context, decl);
+			gencontext_emit_store(context, decl, gencontext_get_next_parameter(context, index));
+			break;
+		case ABI_ARG_INDIRECT_REALIGNED:
+		case ABI_ARG_INDIRECT:
+			{
+				LLVMValueRef pointer = gencontext_get_next_parameter(context, index);
+				LLVMValueRef load = gencontext_emit_load(context, decl->type, pointer);
+				if (info->kind == ABI_ARG_INDIRECT_REALIGNED)
+				{
+					LLVMSetAlignment(load, info->realignment);
+				}
+				decl->backend_ref = gencontext_emit_decl_alloca(context, decl);
+				gencontext_emit_store(context, decl, load);
+			}
+			break;
+		case ABI_ARG_EXPAND:
+			gencontext_expand_from_args(context, decl->type, decl->backend_ref = gencontext_emit_decl_alloca(context, decl), index);
+			break;
+		case ABI_ARG_DIRECT_COERCE:
+		{
+			decl->backend_ref = gencontext_emit_decl_alloca(context, decl);
+			LLVMValueRef param = gencontext_get_next_parameter(context, index);
+			LLVMValueRef coerced = gencontext_emit_convert_value_from_coerced(context, llvm_abi_type(info->direct_coerce_type),
+																	 param, decl->type);
+			gencontext_emit_store(context, decl, coerced);
+			break;
+		}
+		case ABI_ARG_DIRECT_PAIR:
+		{
+			// Todo - does extend work?
+			assert(!info->direct_pair.low_extend_type);
+			LLVMTypeRef low_type = llvm_abi_type(info->direct_pair.low_extend_type ?: info->direct_pair.low_type);
+			LLVMTypeRef hi_type = llvm_abi_type(info->direct_pair.high_type);
+			LLVMTypeRef ref[2] = { low_type, hi_type };
+			LLVMTypeRef type = LLVMStructTypeInContext(context->context, ref, 2, false);
+			LLVMValueRef direct = gencontext_emit_alloca(context, type, LLVMPreferredAlignmentOfType(target_data_layout(), type), "directpair");
+			LLVMValueRef lo_ptr = LLVMBuildStructGEP2(context->builder, type, direct, 0, "lo");
+			LLVMBuildStore(context->builder, gencontext_get_next_parameter(context, index), lo_ptr);
+			LLVMValueRef hi_ptr = LLVMBuildStructGEP2(context->builder, type, direct, 1, "hi");
+			LLVMBuildStore(context->builder, gencontext_get_next_parameter(context, index), hi_ptr);
+			LLVMValueRef struct_alloc = gencontext_emit_decl_alloca(context, decl);
+			LLVMValueRef bitcast = gencontext_emit_bitcast(context, direct, type_get_ptr(decl->type));
+			LLVMBuildMemCpy(context->builder, struct_alloc,
+				        LLVMGetAlignment(struct_alloc), bitcast, LLVMGetAlignment(direct),
+				        llvm_int(type_usize->canonical, type_size(decl->type)));
+			decl->backend_ref = struct_alloc;
+			break;
+		}
+		case ABI_ARG_EXPAND_PADDED:
+		case ABI_ARG_DIRECT_HIGH:
+			TODO
+	}
 	if (gencontext_use_debug(context))
 	{
 		SourceLocation *loc = TOKLOC(decl->span.loc);
@@ -85,37 +216,125 @@ static inline void gencontext_emit_parameter(GenContext *context, Decl *decl, un
 				context->debug.function,
 				name,
 				strlen(name),
-				index + 1,
+				*index + 1, // <- incorrect
 				context->debug.file,
 				loc->line,
 				gencontext_get_debug_type(context, decl->type),
 				true, 0 /* flags */
-				);
+		                                                          );
 		decl->var.backend_debug_ref = var;
 		LLVMDIBuilderInsertDeclareAtEnd(context->debug.builder,
 		                                decl->backend_ref, var, LLVMDIBuilderCreateExpression(context->debug.builder, NULL, 0),
 		                                LLVMDIBuilderCreateDebugLocation(context->context, loc->line, loc->col, context->debug.function, /* inline at */NULL),
 		                                LLVMGetInsertBlock(context->builder));
 	}
-	gencontext_emit_store(context, decl, LLVMGetParam(context->function, index));
 
 }
 
+void gencontext_emit_return_abi(GenContext *context, LLVMValueRef return_value, LLVMValueRef failable)
+{
+	FunctionSignature *signature = &context->cur_func_decl->func.function_signature;
+	ABIArgInfo *info = signature->ret_abi_info;
+
+	// If we have a failable it's always the return argument, so we need to copy
+	// the return value into the return value holder.
+	LLVMValueRef return_out = context->return_out;
+	Type *return_type = signature->rtype->type;
+
+	// In this case we use the failable as the actual return.
+	if (signature->failable)
+	{
+		if (return_value)
+		{
+			LLVMBuildStore(context->builder, return_value, context->return_out);
+		}
+		return_out = context->failable_out;
+		return_type = type_error;
+		return_value = failable;
+	}
+
+	switch (info->kind)
+	{
+		case ABI_ARG_DIRECT_HVA:
+			TODO
+		case ABI_ARG_INDIRECT:
+			LLVMBuildStore(context->builder, return_value, return_out);
+			gencontext_emit_return_value(context, NULL);
+			return;
+		case ABI_ARG_IGNORE:
+			gencontext_emit_return_value(context, NULL);
+			return;
+		case ABI_ARG_EXPAND:
+		case ABI_ARG_EXPAND_PADDED:
+			// Expands to multiple slots -
+			// Not applicable to return values.
+			UNREACHABLE
+		case ABI_ARG_DIRECT_COERCE:
+			gencontext_emit_return_value(context, gencontext_emit_convert_value_to_coerced(context, llvm_abi_type(info->direct_coerce_type), return_value, return_type));
+			return;
+		case ABI_ARG_DIRECT:
+			// The normal return
+			gencontext_emit_return_value(context, return_value);
+			return;
+		case ABI_ARG_DIRECT_INT_EXTEND:
+		case ABI_ARG_INDIRECT_REALIGNED:
+			TODO
+		case ABI_ARG_DIRECT_PAIR:
+		case ABI_ARG_DIRECT_HIGH:
+			TODO
+	}
+	assert(return_value);
+	Type *coerce_type = info->coerce_type;
+	LLVMTypeRef coerce_llvm = llvm_type(coerce_type);
+	LLVMTypeRef return_llvm_type = llvm_type(return_type);
+	if (coerce_llvm == return_llvm_type && info->direct_offset == 0)
+	{
+		gencontext_emit_return_value(context, return_value);
+	}
+	// For more complex cases, store the value
+	// into a temporary alloca and then perform
+	// a coerced load from it.
+	LLVMValueRef source = gencontext_emit_alloca(context, return_llvm_type, 0, "coerce");
+	LLVMBuildStore(context->builder, return_value, source);
+	/*
+				const auto storeInst = createStore(builder_.getBuilder(), returnValue, sourcePtr);
+				storeInst->setAlignment(typeInfo_.getTypeRequiredAlign(returnType).asBytes());
+
+				auto sourceType = returnType;
+
+				if (returnArgInfo.getDirectOffset() != 0) {
+					sourcePtr = builder_.getBuilder().CreateBitCast(sourcePtr, llvm::PointerType::getUnqual(typeInfo_.getLLVMType(Int8Ty)));
+					sourcePtr = builder_.getBuilder().CreateConstGEP1_32(sourcePtr, returnArgInfo.getDirectOffset());
+					sourcePtr = builder_.getBuilder().CreateBitCast(sourcePtr, llvm::PointerType::getUnqual(typeInfo_.getLLVMType(coerceType)));
+					sourceType = coerceType;
+				}
+
+				return createCoercedLoad(typeInfo_,
+				                         builder_,
+				                         sourcePtr,
+				                         sourceType,
+				                         coerceType);
+			}
+
+ */
+
+	if (failable)
+	{
+		TODO
+		// 		LLVMBuildRet(context->builder, );
+	}
+
+}
 void gencontext_emit_implicit_return(GenContext *context)
 {
-	if (context->cur_func_decl->func.function_signature.failable)
+	if (context->cur_func_decl->func.function_signature.rtype->type != type_void)
 	{
-		LLVMBuildRet(context->builder, gencontext_emit_no_error_union(context));
+		LLVMBuildUnreachable(context->builder);
+		return;
 	}
-	else
-	{
-		if (context->cur_func_decl->func.function_signature.rtype->type != type_void && !context->cur_func_decl->func.function_signature.return_param)
-		{
-			LLVMBuildUnreachable(context->builder);
-			return;
-		}
-		LLVMBuildRetVoid(context->builder);
-	}
+	LLVMValueRef failable = context->cur_func_decl->func.function_signature.failable ?
+	                        gencontext_emit_no_error_union(context) : NULL;
+	gencontext_emit_return_abi(context, NULL, failable);
 }
 
 void gencontext_emit_function_body(GenContext *context, Decl *decl)
@@ -149,9 +368,9 @@ void gencontext_emit_function_body(GenContext *context, Decl *decl)
 	context->alloca_point = alloca_point;
 
 	FunctionSignature *signature = &decl->func.function_signature;
-	int arg = 0;
+	unsigned arg = 0;
 
-	if (signature->return_param)
+	if (signature->ret_abi_info->kind == ABI_ARG_INDIRECT)
 	{
 		context->return_out = LLVMGetParam(context->function, arg++);
 	}
@@ -165,11 +384,10 @@ void gencontext_emit_function_body(GenContext *context, Decl *decl)
 		gencontext_push_debug_scope(context, context->debug.function);
 	}
 
-
 	// Generate LLVMValueRef's for all parameters, so we can use them as local vars in code
 	VECEACH(decl->func.function_signature.params, i)
 	{
-		gencontext_emit_parameter(context, decl->func.function_signature.params[i], arg++);
+		gencontext_emit_parameter(context, decl->func.function_signature.params[i], &arg);
 	}
 
 	LLVMSetCurrentDebugLocation2(context->builder, NULL);
@@ -218,13 +436,57 @@ void gencontext_emit_function_decl(GenContext *context, Decl *decl)
 	// Resolve function backend type for function.
 	LLVMValueRef function = LLVMAddFunction(context->module, decl->cname ?: decl->external_name, llvm_type(decl->type));
 	decl->backend_ref = function;
-	if (decl->func.function_signature.return_param)
+	FunctionSignature *signature = &decl->func.function_signature;
+	ABIArgInfo *ret_abi_info = signature->ret_abi_info;
+	switch (ret_abi_info->kind)
 	{
-		if (!decl->func.function_signature.failable)
+		case ABI_ARG_EXPAND:
+		case ABI_ARG_EXPAND_PADDED:
+			UNREACHABLE
+		case ABI_ARG_IGNORE:
+		case ABI_ARG_DIRECT:
+		case ABI_ARG_DIRECT_COERCE:
+			break;
+		case ABI_ARG_DIRECT_INT_EXTEND:
+			gencontext_add_attribute(context, function, type_is_signed(signature->rtype->type) ? sext_attribute : zext_attribute, 0);
+			break;
+		case ABI_ARG_DIRECT_HVA:
+		case ABI_ARG_DIRECT_HIGH:
+		case ABI_ARG_DIRECT_PAIR:
+			break;
+		case ABI_ARG_INDIRECT_REALIGNED:
+			gencontext_add_int_attribute(context, function, align_attribute, ret_abi_info->realignment, 1);
+			FALLTHROUGH;
+		case ABI_ARG_INDIRECT:
+			if (!decl->func.function_signature.failable)
+			{
+				gencontext_add_attribute(context, function, sret_attribute, 1);
+			}
+			gencontext_add_attribute(context, function, noalias_attribute, 1);
+
+	}
+	Decl **params = signature->params;
+	VECEACH(params, i)
+	{
+		Decl *param = params[i];
+		ABIArgInfo *info = param->var.abi_info;
+		unsigned index = info->param_index_start + 1;
+		switch (info->kind)
 		{
-			gencontext_add_attribute(context, function, sret_attribute, 1);
+			case ABI_ARG_INDIRECT_REALIGNED:
+				gencontext_add_int_attribute(context, function, align_attribute, info->realignment, (int)index);
+				FALLTHROUGH;
+			case ABI_ARG_INDIRECT:
+				// TODO then type attributes are added to LLVM-C, use that for byval.
+				gencontext_add_attribute(context, function, byval_attribute, (int)index);
+				break;
+			case ABI_ARG_DIRECT_INT_EXTEND:
+				gencontext_add_attribute(context, function, type_is_signed(param->type) ? sext_attribute : zext_attribute, (int)index);
+				break;
+				// Do byval etc
+			default:
+				break;
 		}
-		gencontext_add_attribute(context, function, noalias_attribute, 1);
 	}
 	if (decl->func.attr_inline)
 	{
@@ -303,7 +565,6 @@ void gencontext_emit_function_decl(GenContext *context, Decl *decl)
 		                                                      build_options.optimization_level != OPTIMIZATION_NONE);
 		LLVMSetSubprogram(function, context->debug.function);
 	}
-	c_abi_func_create_x86(context, &decl->func.function_signature);
 }
 
 

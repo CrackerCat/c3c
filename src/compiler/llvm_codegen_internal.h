@@ -28,6 +28,85 @@ typedef struct
 	LLVMBasicBlockRef next_block;
 }  BreakContinue;
 
+typedef enum
+{
+	ABI_ARG_IGNORE,
+	ABI_ARG_DIRECT,
+	ABI_ARG_DIRECT_PAIR,
+	ABI_ARG_DIRECT_HIGH,
+	ABI_ARG_DIRECT_HVA,
+	ABI_ARG_DIRECT_COERCE,
+	ABI_ARG_DIRECT_INT_EXTEND,
+	ABI_ARG_INDIRECT,
+	ABI_ARG_INDIRECT_REALIGNED,
+	ABI_ARG_EXPAND,
+	ABI_ARG_EXPAND_PADDED,
+}  ABIKind;
+
+typedef enum
+{
+	ABI_TYPE_PLAIN,
+	ABI_TYPE_INT_BITS
+} AbiTypeKind;
+
+typedef struct
+{
+	AbiTypeKind kind : 2;
+	union
+	{
+		Type *type;
+		unsigned int_bits;
+	};
+} AbiType;
+
+typedef struct ABIArgInfo_
+{
+	unsigned param_index_start;
+	ABIKind kind : 6;
+	struct
+	{
+		bool by_reg : 1;
+	} attributes;
+	union
+	{
+		struct
+		{
+			AbiType *low_extend_type;
+			AbiType *high_type;
+			AbiType *low_type;
+		} direct_pair;
+		struct
+		{
+			unsigned byte_size;
+		} direct_coerce_int_sized;
+		struct
+		{
+			union
+			{
+				unsigned direct_offset;
+			};
+			Type *coerce_type;
+		};
+		struct
+		{
+			AbiType *partial_type;
+		};
+		struct
+		{
+			Type* padding_type;
+		};
+		struct
+		{
+			AbiType *direct_coerce_type;
+		};
+		struct
+		{
+			unsigned realignment;
+		};
+	};
+
+} ABIArgInfo;
+
 typedef struct
 {
 	Decl *decl;
@@ -70,6 +149,7 @@ typedef struct
 	DebugContext debug;
 	Context *ast_context;
 	LLVMValueRef return_out;
+	LLVMValueRef failable_out;
 	LLVMBasicBlockRef error_exit_block;
 	LLVMBasicBlockRef expr_block_exit;
 	bool current_block_is_target : 1;
@@ -112,15 +192,22 @@ extern unsigned readonly_attribute;
 extern unsigned optnone_attribute;
 // Sret (pointer)
 extern unsigned sret_attribute;
+// align
+extern unsigned align_attribute;
 // Noalias (pointer)
 extern unsigned noalias_attribute;
+extern unsigned zext_attribute;
+extern unsigned sext_attribute;
+// ByVal (param)
+extern unsigned byval_attribute;
 
 void gencontext_begin_module(GenContext *context);
 void gencontext_end_module(GenContext *context);
 
 
-void
-gencontext_add_attribute(GenContext *context, LLVMValueRef value_to_add_attribute_to, unsigned attribute_id, int index);
+void gencontext_add_attribute(GenContext *context, LLVMValueRef value_to_add_attribute_to, unsigned attribute_id, int index);
+void gencontext_add_string_attribute(GenContext *context, LLVMValueRef value_to_add_attribute_to, const char *attribute, const char *value, int index);
+void gencontext_add_int_attribute(GenContext *context, LLVMValueRef value_to_add_attribute_to, unsigned attribute_id, uint64_t val, int index);
 void gencontext_emit_stmt(GenContext *context, Ast *ast);
 
 void gencontext_generate_catch_block_if_needed(GenContext *context, Ast *ast);
@@ -137,10 +224,12 @@ void gencontext_emit_debug_location(GenContext *context, SourceSpan location);
 void gencontext_debug_push_lexical_scope(GenContext *context, SourceSpan location);
 void gencontext_push_debug_scope(GenContext *context, LLVMMetadataRef debug_scope);
 void gencontext_pop_debug_scope(GenContext *context);
-void c_abi_func_create_x86(GenContext *context, FunctionSignature *signature);
+void c_abi_func_create(GenContext *context, FunctionSignature *signature);
 
 LLVMMetadataRef gencontext_create_builtin_debug_type(GenContext *context, Type *builtin_type);
-LLVMValueRef gencontext_emit_alloca(GenContext *context, LLVMTypeRef type, const char *name);
+LLVMValueRef gencontext_emit_alloca(GenContext *context, LLVMTypeRef type, unsigned alignment, const char *name);
+LLVMValueRef gencontext_emit_alloca_aligned(GenContext *context, Type *type, const char *name);
+LLVMValueRef gencontext_emit_decl_alloca(GenContext *context, Decl *decl);
 void gencontext_emit_compound_stmt(GenContext *context, Ast *ast);
 void gencontext_emit_block(GenContext *context, LLVMBasicBlockRef next_block);
 LLVMValueRef gencontext_emit_memclear_size_align(GenContext *context, LLVMValueRef ref, uint64_t size, unsigned align, bool bitcast);
@@ -179,12 +268,21 @@ static inline LLVMBasicBlockRef gencontext_current_block_if_in_use(GenContext *c
  context->catch_block = _old_catch; \
  context->error_var = _old_error_var
 
+unsigned llvm_abi_size(LLVMTypeRef type);
+unsigned llvm_abi_alignment(LLVMTypeRef type);
+unsigned llvm_store_size(LLVMTypeRef type);
+LLVMTypeRef llvm_type_for_mem(GenContext *context, LLVMTypeRef type);
 void gencontext_emit_function_body(GenContext *context, Decl *decl);
 void gencontext_emit_implicit_return(GenContext *context);
+void gencontext_emit_return_abi(GenContext *context, LLVMValueRef return_value, LLVMValueRef failable);
 void gencontext_emit_function_decl(GenContext *context, Decl *decl);
 void gencontext_emit_extern_decl(GenContext *context, Decl *decl);
 LLVMValueRef gencontext_emit_address(GenContext *context, Expr *expr);
 LLVMTypeRef gencontext_get_llvm_type(GenContext *context, Type *type);
+LLVMTypeRef gencontext_get_llvm_abi_type(GenContext *context, AbiType *type);
+LLVMValueRef gencontext_emit_convert_value_to_coerced(GenContext *context, LLVMTypeRef coerced, LLVMValueRef value, Type *original_type);
+LLVMValueRef gencontext_emit_convert_value_from_coerced(GenContext *context, LLVMTypeRef coerced, LLVMValueRef value, Type *original_type);
+
 static inline LLVMValueRef gencontext_emit_load(GenContext *context, Type *type, LLVMValueRef value)
 {
 	assert(gencontext_get_llvm_type(context, type) == LLVMGetElementType(LLVMTypeOf(value)));
@@ -193,7 +291,14 @@ static inline LLVMValueRef gencontext_emit_load(GenContext *context, Type *type,
 
 static inline void gencontext_emit_return_value(GenContext *context, LLVMValueRef value)
 {
-	LLVMBuildRet(context->builder, value);
+	if (!value)
+	{
+		LLVMBuildRetVoid(context->builder);
+	}
+	else
+	{
+		LLVMBuildRet(context->builder, value);
+	}
 	context->current_block = NULL;
 	context->current_block_is_target = false;
 }
@@ -211,9 +316,9 @@ static inline LLVMValueRef decl_ref(Decl *decl)
 	return decl->backend_ref;
 }
 
-static inline void gencontext_emit_store(GenContext *context, Decl *decl, LLVMValueRef value)
+static inline LLVMValueRef gencontext_emit_store(GenContext *context, Decl *decl, LLVMValueRef value)
 {
-	LLVMBuildStore(context->builder, value, decl_ref(decl));
+	return LLVMBuildStore(context->builder, value, decl_ref(decl));
 }
 
 
@@ -292,6 +397,7 @@ static inline LLVMCallConv llvm_call_convention_from_call(CallABI abi)
 }
 
 #define llvm_type(type) gencontext_get_llvm_type(context, type)
+#define llvm_abi_type(type) gencontext_get_llvm_abi_type(context, type)
 #define llvm_debug_type(type) gencontext_get_debug_type(context, type)
 
 static inline LLVMValueRef gencontext_emit_no_error_union(GenContext *context)

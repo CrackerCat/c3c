@@ -200,6 +200,12 @@ typedef struct
 
 typedef struct
 {
+	Type *base;
+	size_t len;
+} TypeVector;
+
+typedef struct
+{
 	struct _FunctionSignature *signature;
 } TypeFunc;
 
@@ -224,6 +230,9 @@ struct _Type
 		TypeFunc func;
 		// Type*
 		Type *pointer;
+		// TODO
+		TypeVector vector;
+		Type *complex;
 	};
 };
 
@@ -266,7 +275,6 @@ typedef struct
 
 typedef struct
 {
-	uint32_t abi_alignment;
 	uint64_t size;
 	Decl **members;
 } StructDecl;
@@ -289,7 +297,11 @@ typedef struct _VarDecl
 		void *backend_debug_ref;
 		void *scope;
 	};
-	void *failable_ref;
+	union
+	{
+		void *failable_ref;
+		struct ABIArgInfo_ *abi_info;
+	};
 } VarDecl;
 
 
@@ -332,9 +344,9 @@ typedef struct _FunctionSignature
 	CallConvention convention : 4;
 	bool variadic : 1;
 	bool has_default : 1;
-	bool return_param : 1;
 	bool failable : 1;
 	TypeInfo *rtype;
+	struct ABIArgInfo_ *ret_abi_info;
 	Decl** params;
 	const char *mangled_signature;
 } FunctionSignature;
@@ -431,10 +443,10 @@ typedef struct _Decl
 	bool is_packed : 1;
 	bool has_addr : 1;
 	void *backend_ref;
-	void *abi_ref;
 	const char *cname;
 	uint32_t alignment;
 	const char *section;
+	size_t offset;
 	/*	bool is_exported : 1;
 	bool is_used : 1;
 	bool is_used_public : 1;
@@ -1161,7 +1173,7 @@ extern Diagnostics diagnostics;
 
 
 extern Type *type_bool, *type_void, *type_string, *type_voidptr;
-extern Type *type_float, *type_double;
+extern Type *type_half, *type_float, *type_double, *type_quad;
 extern Type *type_char, *type_short, *type_int, *type_long, *type_isize;
 extern Type *type_byte, *type_ushort, *type_uint, *type_ulong, *type_usize;
 extern Type *type_compint, *type_compfloat;
@@ -1174,6 +1186,7 @@ extern const char *attribute_list[NUMBER_OF_ATTRIBUTES];
 extern const char *kw_main;
 extern const char *kw_sizeof;
 extern const char *kw_alignof;
+extern const char *kw_align;
 extern const char *kw_offsetof;
 extern const char *kw_kindof;
 extern const char *kw_nameof;
@@ -1460,6 +1473,7 @@ Type *type_get_vararray(Type *arr_type);
 Type *type_get_meta(Type *meta_type);
 Type *type_get_indexed_type(Type *type);
 Type *type_get_array(Type *arr_type, uint64_t len);
+Type *type_get_vector(Type *vector_type, unsigned len);
 bool type_is_user_defined(Type *type);
 Type *type_signed_int_by_bitsize(unsigned bytesize);
 Type *type_unsigned_int_by_bitsize(unsigned bytesize);
@@ -1467,6 +1481,7 @@ bool type_is_subtype(Type *type, Type *possible_subtype);
 Type *type_find_common_ancestor(Type *left, Type *right);
 const char *type_to_error_string(Type *type);
 size_t type_size(Type *type);
+unsigned int type_alloca_alignment(Type *type);
 unsigned int type_abi_alignment(Type *type);
 const char *type_generate_qname(Type *type);
 void type_append_signature_name(Type *type, char *dst, size_t *offset);
@@ -1480,11 +1495,15 @@ static inline bool type_is_signed(Type *type) { return type->type_kind >= TYPE_I
 static inline bool type_is_unsigned(Type *type) { return type->type_kind >= TYPE_U8 && type->type_kind <= TYPE_U64; }
 static inline bool type_ok(Type *type) { return !type || type->type_kind != TYPE_POISONED; }
 static inline bool type_info_ok(TypeInfo *type_info) { return !type_info || type_info->kind != TYPE_INFO_POISON; }
-bool type_is_aggregate(Type *type);
+bool type_is_abi_aggregate(Type *type);
 bool type_is_homogenous_aggregate(Type *type, Type **base, unsigned *elements);
 bool type_may_have_sub_elements(Type *type);
-Type *type_find_single_element(Type *type);
-bool type_is_empty(Type *type);
+Type *type_find_single_struct_element(Type *type);
+bool type_is_int128(Type *type);
+bool type_is_empty_union_struct(Type *type, bool allow_array);
+bool type_is_union_struct(Type *type);
+bool type_is_empty_field(Type *type, bool allow_array);
+
 static inline bool type_kind_is_derived(TypeKind kind)
 {
 	switch (kind)
@@ -1497,6 +1516,21 @@ static inline bool type_kind_is_derived(TypeKind kind)
 		default:
 			return false;
 	}
+}
+
+/**
+ * Check if this type is a promotable integer for the current
+ * architecture.
+ *
+ * @param type
+ * @return true if it is, false otherwise.
+ */
+static inline bool type_is_promotable_integer(Type *type)
+{
+	// If we support other architectures, update this.
+	TypeKind kind = type->canonical->type_kind;
+	if (kind == TYPE_BOOL) return true;
+	return type_kind_is_any_integer(kind) && type->builtin.bytesize < type_int->builtin.bytesize;
 }
 
 static inline Type *type_lowering(Type *type)
@@ -1512,6 +1546,11 @@ static inline bool type_is_vector(Type *type)
 }
 
 static inline bool type_is_structlike_with_vector(Type *type)
+{
+	return false;
+}
+
+static inline bool type_is_complex(Type *type)
 {
 	return false;
 }
@@ -1588,7 +1627,12 @@ static inline bool type_is_ct(Type *type)
 
 static inline bool type_is_pointer(Type *type)
 {
-	return type->type_kind == TYPE_POINTER || type->type_kind == TYPE_ARRAY || type->type_kind == TYPE_VARARRAY;
+	return type->type_kind == TYPE_POINTER || type->type_kind == TYPE_VARARRAY;
+}
+
+static inline size_t aligned_offset(size_t offset, size_t alignment)
+{
+	return ((offset + alignment - 1) / alignment) * alignment;
 }
 
 static inline bool type_is_float(Type *type)

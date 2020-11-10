@@ -3293,6 +3293,10 @@ static bool sema_expr_analyse_comp(Context *context, Expr *expr, Expr *left, Exp
 						return false;
 					}
 					break;
+				case TYPE_COMPLEX:
+					TODO
+				case TYPE_VECTOR:
+					TODO
 			}
 		}
 
@@ -3610,17 +3614,12 @@ static bool sema_expr_analyse_not(Context *context, Type *to, Expr *expr, Expr *
 		case TYPE_POINTER:
 		case TYPE_VARARRAY:
 		case TYPE_SUBARRAY:
+		case TYPE_COMPLEX:
 		case TYPE_BOOL:
-		case TYPE_I8:
-		case TYPE_I16:
-		case TYPE_I32:
-		case TYPE_I64:
-		case TYPE_U8:
-		case TYPE_U16:
-		case TYPE_U32:
-		case TYPE_U64:
-		case TYPE_F32:
-		case TYPE_F64:
+		case TYPE_VECTOR:
+		case ALL_REAL_FLOATS:
+		case ALL_UNSIGNED_INTS:
+		case ALL_SIGNED_INTS:
 			return true;
 		case TYPE_STRUCT:
 		case TYPE_UNION:

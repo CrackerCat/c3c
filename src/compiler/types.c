@@ -6,7 +6,7 @@
 
 static Type t_u0, t_str, t_u1, t_i8, t_i16, t_i32, t_i64, t_ixx;
 static Type t_u8, t_u16, t_u32, t_u64;
-static Type t_f32, t_f64, t_fxx;
+static Type t_f16, t_f32, t_f64, t_f128, t_fxx;
 static Type t_usz, t_isz;
 static Type t_cus, t_cui, t_cul, t_cull;
 static Type t_cs, t_ci, t_cl, t_cll;
@@ -16,8 +16,10 @@ Type *type_bool = &t_u1;
 Type *type_void = &t_u0;
 Type *type_string = &t_str;
 Type *type_voidptr = &t_voidstar;
+Type *type_half = &t_f16;
 Type *type_float = &t_f32;
 Type *type_double = &t_f64;
+Type *type_quad = &t_f128;
 Type *type_typeid = &t_typeid;
 Type *type_typeinfo = &t_typeinfo;
 Type *type_char = &t_i8;
@@ -87,18 +89,8 @@ const char *type_to_error_string(Type *type)
 		case TYPE_STRUCT:
 		case TYPE_VOID:
 		case TYPE_BOOL:
-		case TYPE_I8:
-		case TYPE_I16:
-		case TYPE_I32:
-		case TYPE_I64:
-		case TYPE_IXX:
-		case TYPE_U8:
-		case TYPE_U16:
-		case TYPE_U32:
-		case TYPE_U64:
-		case TYPE_F32:
-		case TYPE_F64:
-		case TYPE_FXX:
+		case ALL_INTS:
+		case ALL_FLOATS:
 		case TYPE_UNION:
 		case TYPE_ERRTYPE:
 			return type->name;
@@ -114,6 +106,9 @@ const char *type_to_error_string(Type *type)
 
 			return strcat_arena(buffer, ")");
 		}
+		case TYPE_COMPLEX:
+		case TYPE_VECTOR:
+			TODO
 		case TYPE_MEMBER:
 			return "member";
 		case TYPE_TYPEINFO:
@@ -174,6 +169,10 @@ size_t type_size(Type *type)
 {
 	switch (type->type_kind)
 	{
+		case TYPE_VECTOR:
+			return type_size(type->vector.base) * type->vector.len;
+		case TYPE_COMPLEX:
+			return type_size(type->complex) * 2;
 		case TYPE_POISONED:
 		case TYPE_TYPEINFO:
 		case TYPE_MEMBER:
@@ -215,82 +214,106 @@ const char *type_generate_qname(Type *type)
 	return strformat("%s::%s", type->decl->module->name->module, type->name);
 }
 
-static inline bool type_is_homogenous_aggregate_small_enough(Type *type, unsigned members)
+
+
+bool type_is_union_struct(Type *type)
 {
-	switch (build_target.arch)
-	{
-		case ARCH_TYPE_X86:
-		case ARCH_TYPE_X86_64:
-		case ARCH_TYPE_ARM:
-		case ARCH_TYPE_THUMB:
-		case ARCH_TYPE_ARMB:
-		case ARCH_TYPE_THUMBEB:
-		case ARCH_TYPE_AARCH64:
-		case ARCH_TYPE_AARCH64_32:
-		case ARCH_TYPE_AARCH64_BE:
-			return  members <= 4;
-		case ARCH_TYPE_PPC64:
-		case ARCH_TYPE_PPC64LE:
-		{
-			// If is float128 & has float => 1 reg TODO if float128
-			// If is vector => 1 reg
-			unsigned regs = type_is_vector(type) ? 1 : (type_size(type) + 63) / 64;
-			// Homogeneous Aggregates may occupy at most 8 registers.
-			return members * regs <= 8;
-		}
-		default:
-			return false;
-	}
+	TypeKind kind = type->canonical->type_kind;
+	return kind == TYPE_STRUCT | kind == TYPE_UNION;
 }
 
-bool type_is_empty(Type *type)
+bool type_is_empty_field(Type *type, bool allow_array)
 {
-	switch (type->type_kind)
+	type = type->canonical;
+	if (allow_array)
 	{
-		case TYPE_UNION:
-		case TYPE_STRUCT:
-			return vec_size(type->decl->strukt.members) == 0;
-		case TYPE_ARRAY:
-			return type->array.len == 0;
-		default:
-			return false;
+		while (type->type_kind == TYPE_ARRAY)
+		{
+			if (type->array.len == 0) return true;
+			type = type->array.base->canonical;
+		}
 	}
+	return type_is_union_struct(type) && type_is_empty_union_struct(type, allow_array);
 }
-Type *type_find_single_element(Type *type)
+
+bool type_is_empty_union_struct(Type *type, bool allow_array)
 {
-	if (!type_is_structlike(type)) return NULL;
+	if (!type_is_union_struct(type)) return false;
+
+	Decl **members = type->decl->strukt.members;
+	VECEACH(members, i)
+	{
+		if (!type_is_empty_field(members[i]->type, allow_array)) return false;
+	}
+	return true;
+}
+
+bool type_is_int128(Type *type)
+{
+	TypeKind kind = type->canonical->type_kind;
+	return kind == TYPE_U128 || kind == TYPE_I128;
+}
+
+Type *type_find_single_struct_element(Type *type)
+{
+	if (!type_is_union_struct(type)) return NULL;
+
 	Type *found = NULL;
 	Decl **members = type->decl->strukt.members;
 	VECEACH(members, i)
 	{
-		Type *member_type = members[i]->type->canonical;
-		if (type_is_empty(member_type)) continue;
+		// Ignore empty arrays
+		if (type_is_empty_field(members[i]->type, true)) continue;
+
+		// Already one element found, not single element.
 		if (found) return NULL;
-		// Collapse array
-		while (member_type->type_kind == TYPE_ARRAY && member_type->array.len == 1)
+
+		Type *field_type = members[i]->type->canonical;
+
+		while (field_type->type_kind == TYPE_ARRAY)
 		{
-			member_type = member_type->array.base;
+			if (field_type->array.len != 1) break;
+			field_type = field_type->array.base;
 		}
-		if (type_is_structlike(member_type))
+
+		if (type_is_union_struct(field_type))
 		{
-			member_type = type_find_single_element(type);
-			if (!member_type) return NULL;
+			field_type = type_find_single_struct_element(field_type);
+			if (!field_type) return NULL;
 		}
-		found = member_type->canonical;
+		found = field_type;
 	}
 	// If there is some padding? Then ignore.
 	if (found && type_size(type) != type_size(found)) found = NULL;
 	return found;
 }
 
-bool type_is_aggregate(Type *type)
+static bool type_is_qpx_vector(Type *type)
+{
+	if (build_target.abi != ABI_PPC64_SVR4 || !build_target.ppc64.has_qpx) return false;
+	type = type->canonical;
+	if (type->type_kind != TYPE_VECTOR) return false;
+	if (type->vector.len == 1) return false;
+	switch (type->vector.base->type_kind)
+	{
+		case TYPE_F64:
+			return type_size(type) >= 256 / 8;
+		case TYPE_F32:
+			return type_size(type) <= 128 / 8;
+		default:
+			return false;
+	}
+}
+
+
+bool type_is_abi_aggregate(Type *type)
 {
 	switch (type->type_kind)
 	{
 		case TYPE_POISONED:
 			return false;
 		case TYPE_TYPEDEF:
-			return type_is_aggregate(type->canonical);
+			return type_is_abi_aggregate(type->canonical);
 		case ALL_FLOATS:
 		case TYPE_VOID:
 		case ALL_INTS:
@@ -300,14 +323,16 @@ bool type_is_aggregate(Type *type)
 		case TYPE_POINTER:
 		case TYPE_ENUM:
 		case TYPE_FUNC:
+		case TYPE_STRING:
+		case TYPE_ERRTYPE:
+		case TYPE_VECTOR:
 			return false;
 		case TYPE_STRUCT:
 		case TYPE_UNION:
 		case TYPE_SUBARRAY:
 		case TYPE_ARRAY:
-		case TYPE_STRING:
 		case TYPE_ERR_UNION:
-		case TYPE_ERRTYPE:
+		case TYPE_COMPLEX:
 			return true;
 		case TYPE_TYPEINFO:
 		case TYPE_MEMBER:
@@ -317,8 +342,109 @@ bool type_is_aggregate(Type *type)
 }
 bool type_is_homogenous_base_type(Type *type)
 {
-	// TODO vector
-	return true;
+	type = type->canonical;
+	switch (build_target.abi)
+	{
+		case ABI_PPC64_SVR4:
+			switch (type->type_kind)
+			{
+				case TYPE_F128:
+					if (!build_target.float_128) return false;
+				case TYPE_F32:
+				case TYPE_F64:
+					return !build_target.ppc64.is_softfp;
+				case TYPE_VECTOR:
+					return type_size(type) == 128 / 8 || type_is_qpx_vector(type);
+				default:
+					return false;
+			}
+		case ABI_X64:
+		case ABI_WIN64:
+		case ABI_X86:
+			switch (type->type_kind)
+			{
+				case TYPE_F64:
+				case TYPE_F32:
+					return true;
+				case TYPE_VECTOR:
+					switch (type_size(type))
+					{
+						case 16:
+						case 32:
+						case 64:
+							// vec128 256 512 ok
+							return true;
+						default:
+							return false;
+					}
+				default:
+					return false;
+			}
+		case ABI_AARCH64:
+			switch (type->type_kind)
+			{
+				case ALL_FLOATS:
+					return true;
+				case TYPE_VECTOR:
+					switch (type_size(type))
+					{
+						case 8:
+						case 16:
+							// vector 64, 128 => true
+							return true;
+						default:
+							return false;
+					}
+				default:
+					return false;
+			}
+		case ABI_ARM:
+			switch (type->type_kind)
+			{
+				case TYPE_F32:
+				case TYPE_F64:
+				case TYPE_F128:
+					return true;
+				case TYPE_VECTOR:
+					switch (type_size(type))
+					{
+						case 8:
+						case 16:
+							return true;
+					}
+				default:
+					return false;
+			}
+		case ABI_UNKNOWN:
+		case ABI_WASM:
+		case ABI_PPC32:
+		case ABI_RISCV:
+			return false;
+	}
+	UNREACHABLE
+}
+
+bool type_homogenous_aggregate_small_enough(Type *type, unsigned members)
+{
+	switch (build_target.abi)
+	{
+		case ABI_PPC64_SVR4:
+			if (type->type_kind == TYPE_F128 && build_target.float_128) return members <= 8;
+			if (type->type_kind == TYPE_VECTOR) return members <= 8;
+			return ((type_size(type) + 7) / 8) * members <= 8;
+		case ABI_X64:
+		case ABI_WIN64:
+		case ABI_X86:
+		case ABI_AARCH64:
+		case ABI_ARM:
+			return members <= 4;
+		case ABI_UNKNOWN:
+		case ABI_WASM:
+		case ABI_PPC32:
+		case ABI_RISCV:
+			return false;
+	}
+	UNREACHABLE
 }
 
 bool type_is_homogenous_aggregate(Type *type, Type **base, unsigned *elements)
@@ -326,21 +452,31 @@ bool type_is_homogenous_aggregate(Type *type, Type **base, unsigned *elements)
 	*elements = 0;
 	switch (type->type_kind)
 	{
+		case TYPE_COMPLEX:
+			*base = type->complex;
+			*elements = 2;
+			break;
 		case TYPE_FXX:
 		case TYPE_POISONED:
 		case TYPE_IXX:
 		case TYPE_VOID:
 		case TYPE_TYPEINFO:
 		case TYPE_MEMBER:
-		case TYPE_ERR_UNION:
 		case TYPE_TYPEID:
 		case TYPE_FUNC:
 		case TYPE_STRING:
 		case TYPE_SUBARRAY:
 			return false;
+		case TYPE_ERR_UNION:
+			*base = type_usize->canonical;
+			*elements = 2;
+			return true;
+		case TYPE_ERRTYPE:
+			*base = type_usize->canonical;
+			*elements = 1;
+			return true;
 		case TYPE_TYPEDEF:
 			return type_is_homogenous_aggregate(type->canonical, base, elements);
-		case TYPE_ERRTYPE:
 		case TYPE_STRUCT:
 		case TYPE_UNION:
 			*elements = 0;
@@ -348,9 +484,19 @@ bool type_is_homogenous_aggregate(Type *type, Type **base, unsigned *elements)
 				Decl **members = type->decl->strukt.members;
 				VECEACH(members, i)
 				{
-					Type *member_type = members[i]->type;
+					unsigned member_mult = 1;
+					Type *member_type = members[i]->type->canonical;
+					while (member_type->type_kind == TYPE_ARRAY)
+					{
+						if (member_type->array.len == 0) return false;
+						member_mult *= member_type->array.len;
+						member_type = member_type->array.base;
+					}
 					unsigned member_members = 0;
+					if (type_is_empty_field(member_type, true)) continue;
+
 					if (!type_is_homogenous_aggregate(member_type, base, &member_members)) return false;
+					member_members *= member_mult;
 					if (type->type_kind == TYPE_UNION)
 					{
 						*elements = MAX(*elements, member_members);
@@ -360,6 +506,7 @@ bool type_is_homogenous_aggregate(Type *type, Type **base, unsigned *elements)
 						*elements += member_members;
 					}
 				}
+				assert(base);
 				// Ensure no padding
 				if (type_size(*base) * *elements != type_size(type)) return false;
 			}
@@ -377,19 +524,13 @@ bool type_is_homogenous_aggregate(Type *type, Type **base, unsigned *elements)
 			// Lower bool to unsigned char
 			type = type_byte;
 			break;
-		case TYPE_I8:
-		case TYPE_I16:
-		case TYPE_I32:
-		case TYPE_I64:
+		case ALL_SIGNED_INTS:
 			// Lower signed to unsigned
 			type = type_unsigned_int_by_bitsize(type->builtin.bytesize);
 			break;
-		case TYPE_U8:
-		case TYPE_U16:
-		case TYPE_U32:
-		case TYPE_U64:
-		case TYPE_F32:
-		case TYPE_F64:
+		case ALL_UNSIGNED_INTS:
+		case ALL_REAL_FLOATS:
+		case TYPE_VECTOR:
 			break;
 		case TYPE_POINTER:
 		case TYPE_VARARRAY:
@@ -397,12 +538,34 @@ bool type_is_homogenous_aggregate(Type *type, Type **base, unsigned *elements)
 			type = type_voidptr;
 			break;
 	}
+	*elements = 1;
 	if (!type_is_homogenous_base_type(type)) return false;
+	if (!*base)
+	{
+		*base = type;
+		// Special handling of non-power-of-2 vectors
+		if (type->type_kind == TYPE_VECTOR)
+		{
+			// Expand to actual size.
+			unsigned vec_elements = type_size(type) / type_size(type->vector.base);
+			*base = type_get_vector(type->vector.base, vec_elements);
+		}
+	}
+	// One is vector - other isn't => failure
+	if (((*base)->type_kind == TYPE_VECTOR) != (type->type_kind == TYPE_VECTOR)) return false;
+	// Size does not match => failure
+	if (type_size(*base) != type_size(type)) return false;
 
 	TYPECHECK:
 	if (*elements == 0) return false;
-	return type_is_homogenous_aggregate_small_enough(type, *elements);
+	return type_homogenous_aggregate_small_enough(type, *elements);
 }
+
+unsigned int type_alloca_alignment(Type *type)
+{
+	return type_abi_alignment(type);
+}
+
 unsigned int type_abi_alignment(Type *type)
 {
 	switch (type->type_kind)
@@ -412,6 +575,9 @@ unsigned int type_abi_alignment(Type *type)
 		case TYPE_TYPEINFO:
 		case TYPE_MEMBER:
 			UNREACHABLE;
+		case TYPE_VECTOR:
+		case TYPE_COMPLEX:
+			TODO
 		case TYPE_TYPEDEF:
 			return type_abi_alignment(type->canonical);
 		case TYPE_ENUM:
@@ -420,7 +586,7 @@ unsigned int type_abi_alignment(Type *type)
 			return alignment_error_code;
 		case TYPE_STRUCT:
 		case TYPE_UNION:
-			return type->decl->strukt.abi_alignment;
+			return type->decl->alignment;
 		case TYPE_TYPEID:
 		case TYPE_BOOL:
 		case ALL_INTS:
@@ -582,40 +748,61 @@ Type *type_get_indexed_type(Type *type)
 }
 
 
-Type *type_create_array(Type *arr_type, uint64_t len, bool canonical)
+static Type *type_create_array(Type *element_type, uint64_t len, bool vector, bool canonical)
 {
-	if (canonical) arr_type = arr_type->canonical;
-	if (!arr_type->type_cache)
+	if (canonical) element_type = element_type->canonical;
+	if (!element_type->type_cache)
 	{
-		create_type_cache(arr_type);
+		create_type_cache(element_type);
 	}
-	int entries = (int)vec_size(arr_type->type_cache);
+	int entries = (int)vec_size(element_type->type_cache);
 	for (int i = ARRAY_OFFSET; i < entries; i++)
 	{
-		Type *ptr = arr_type->type_cache[i];
-		if (ptr->array.len == len)
+		Type *ptr_vec = element_type->type_cache[i];
+		if (vector)
 		{
-			return ptr;
+			if (ptr_vec->type_kind != TYPE_VECTOR) continue;
+			if (ptr_vec->vector.len == len) return ptr_vec;
+		}
+		else
+		{
+			if (ptr_vec->type_kind == TYPE_VECTOR) continue;
+			if (ptr_vec->array.len == len) return ptr_vec;
 		}
 	}
-	Type *array = type_new(TYPE_ARRAY, strformat("%s[%llu]", arr_type->name, len));
-	array->array.base = arr_type;
-	array->array.len = len;
-	if (arr_type->canonical == arr_type)
+	Type *vec_arr;
+	if (vector)
 	{
-		array->canonical = array;
+		vec_arr = type_new(TYPE_VECTOR, strformat("%s[<%llu>]", element_type->name, len));
+		vec_arr->vector.base = element_type;
+		vec_arr->vector.len = len;
 	}
 	else
 	{
-		array->canonical = type_create_array(arr_type, len, true);
+		vec_arr = type_new(TYPE_ARRAY, strformat("%s[%llu]", element_type->name, len));
+		vec_arr->array.base = element_type;
+		vec_arr->array.len = len;
 	}
-	VECADD(arr_type->type_cache, array);
-	return array;
+	if (element_type->canonical == element_type)
+	{
+		vec_arr->canonical = vec_arr;
+	}
+	else
+	{
+		vec_arr->canonical = type_create_array(element_type, len, vector, true);
+	}
+	VECADD(element_type->type_cache, vec_arr);
+	return vec_arr;
 }
 
 Type *type_get_array(Type *arr_type, uint64_t len)
 {
-	return type_create_array(arr_type, len, false);
+	return type_create_array(arr_type, len, false, false);
+}
+
+Type *type_get_vector(Type *vector_type, unsigned len)
+{
+	return type_create_array(vector_type, len, true, false);
 }
 
 static void type_create(const char *name, Type *location, TypeKind kind, unsigned bitsize,
@@ -750,22 +937,27 @@ typedef enum
 
 Type *type_find_max_num_type(Type *num_type, Type *other_num)
 {
-	if (other_num->type_kind < TYPE_I8 || other_num->type_kind > TYPE_FXX) return NULL;
-	assert(num_type->type_kind >= TYPE_I8 && num_type->type_kind <= TYPE_FXX);
-	static MaxType max_conv[TYPE_FXX - TYPE_I8 + 1][TYPE_FXX - TYPE_BOOL + 1] = {
-		// I8 I16 I32 I64  U8 U16 U32 U64 IXX F32 F64 FXX
-		{   L,  R,  R,  R,  X,  X,  X,  X,  L,  R,  R,  FL }, // I8
-		{   L,  L,  R,  R,  L,  X,  X,  X,  L,  R,  R,  FL }, // I16
-		{   L,  L,  L,  R,  L,  L,  X,  X,  L,  R,  R,  FL }, // I32
-		{   L,  L,  L,  L,  L,  L,  L,  X,  L,  R,  R,  FL }, // I64
-		{   X,  R,  R,  R,  L,  R,  R,  R,  L,  R,  R,  FL }, // U8
-		{   X,  X,  R,  R,  L,  L,  R,  R,  L,  R,  R,  FL }, // U16
-		{   X,  X,  X,  R,  L,  L,  L,  R,  L,  R,  R,  FL }, // U32
-		{   X,  X,  X,  X,  L,  L,  L,  L,  L,  R,  R,  FL }, // U64
-		{   R,  R,  R,  R,  R,  R,  R,  R,  L,  R,  R,  R  }, // IXX
-		{   L,  L,  L,  L,  L,  L,  L,  L,  L,  L,  R,  L  }, // F32
-		{   L,  L,  L,  L,  L,  L,  L,  L,  L,  L,  L,  L  }, // F64
-		{  FL, FL, FL, FL, FL, FL, FL, FL, FL,  R,  R,  L  }, // FXX
+	TypeKind kind = num_type->type_kind;
+	TypeKind other_kind = other_num->type_kind;
+	if (other_kind < TYPE_I8 || other_kind > TYPE_FXX) return NULL;
+	static MaxType max_conv[TYPE_FXX - TYPE_I8 + 1][TYPE_FXX - TYPE_I8 + 1] = {
+		// I8 I16 I32 I64 I128 U8 U16 U32 U64 U128 IXX F16 F32 F64 F128 FXX
+		{   L,  R,  R,  R,  R,  X,  X,  X,  X,  X,  L,  R,  R,  R,  R,  FL }, // I8
+		{   L,  L,  R,  R,  R,  L,  X,  X,  X,  X,  L,  R,  R,  R,  R,  FL }, // I16
+		{   L,  L,  L,  R,  R,  L,  L,  X,  X,  X,  L,  R,  R,  R,  R,  FL }, // I32
+		{   L,  L,  L,  L,  R,  L,  L,  L,  X,  X,  L,  R,  R,  R,  R,  FL }, // I64
+		{   L,  L,  L,  L,  L,  L,  L,  L,  X,  X,  L,  R,  R,  R,  R,  FL }, // I128
+		{   X,  R,  R,  R,  R,  L,  R,  R,  R,  R,  L,  R,  R,  R,  R,  FL }, // U8
+		{   X,  X,  R,  R,  R,  L,  L,  R,  R,  R,  L,  R,  R,  R,  R,  FL }, // U16
+		{   X,  X,  X,  R,  R,  L,  L,  L,  R,  R,  L,  R,  R,  R,  R,  FL }, // U32
+		{   X,  X,  X,  X,  R,  L,  L,  L,  L,  R,  L,  R,  R,  R,  R,  FL }, // U64
+		{   X,  X,  X,  X,  X,  L,  L,  L,  L,  L,  L,  R,  R,  R,  R,  FL }, // U128
+		{   R,  R,  R,  R,  R,  R,  R,  R,  R,  R,  L,  R,  R,  R,  R,  R  }, // IXX
+		{   L,  L,  L,  L,  L,  L,  L,  L,  L,  L,  L,  L,  R,  R,  R,  L  }, // F16
+		{   L,  L,  L,  L,  L,  L,  L,  L,  L,  L,  L,  L,  L,  R,  R,  L  }, // F32
+		{   L,  L,  L,  L,  L,  L,  L,  L,  L,  L,  L,  L,  L,  L,  R,  L  }, // F64
+		{   L,  L,  L,  L,  L,  L,  L,  L,  L,  L,  L,  L,  L,  L,  L,  L  }, // F128
+		{  FL, FL, FL, FL, FL, FL, FL, FL, FL, FL, FL,  R,  R,  R,  R,  L  }, // FXX
 	};
 	MaxType conversion = max_conv[num_type->type_kind - TYPE_I8][other_num->type_kind - TYPE_I8];
 	switch (conversion)
@@ -888,20 +1080,10 @@ Type *type_find_max_type(Type *type, Type *other)
 		case TYPE_TYPEINFO:
 		case TYPE_MEMBER:
 			return NULL;
-		case TYPE_I8:
-		case TYPE_I16:
-		case TYPE_I32:
-		case TYPE_I64:
-		case TYPE_IXX:
-		case TYPE_U8:
-		case TYPE_U16:
-		case TYPE_U32:
-		case TYPE_U64:
+		case ALL_INTS:
 			if (other->type_kind == TYPE_ENUM) return type_find_max_type(type, other->decl->enums.type_info->type->canonical);
 			FALLTHROUGH;
-		case TYPE_F32:
-		case TYPE_F64:
-		case TYPE_FXX:
+		case ALL_FLOATS:
 			return type_find_max_num_type(type, other);
 		case TYPE_POINTER:
 			return type_find_max_ptr_type(type, other);
@@ -929,6 +1111,12 @@ Type *type_find_max_type(Type *type, Type *other)
 			return type_find_max_vararray_type(type, other);
 		case TYPE_SUBARRAY:
 			TODO
+		case TYPE_VECTOR:
+			// No implicit conversion between vectors
+			return NULL;
+		case TYPE_COMPLEX:
+			// Implicit conversion or not?
+			TODO;
 	}
 	UNREACHABLE
 }

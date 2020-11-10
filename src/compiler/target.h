@@ -176,30 +176,12 @@ typedef enum
 	ABI_X64,
 	ABI_WIN64,
 	ABI_X86,
-	ABI_PNACL,
-	ABI_MIPS,
-	ABI_AVR,
 	ABI_AARCH64,
 	ABI_WASM,
-	ABI_WINARM,
 	ABI_ARM,
 	ABI_PPC32,
 	ABI_PPC64_SVR4,
-	ABI_PPC64,
-	ABI_NVPTX,
-	ABI_MSP430,
 	ABI_RISCV,
-	ABI_SYSTEMZ,
-	ABI_TCE,
-	ABI_HEXAGON,
-	ABI_LANAI,
-	ABI_R600,
-	ABI_AMDGPU,
-	ABI_SPARC,
-	ABI_SPARCV9,
-	ABI_XCORE,
-	ABI_ARC,
-	ABI_SPIR
 } ABI;
 
 typedef enum
@@ -215,6 +197,13 @@ typedef enum
 	FLOAT_ABI_SOFT,
 	FLOAT_ABI_HARD,
 } FloatABI;
+
+typedef enum
+{
+	AVX_NONE,
+	AVX,
+	AVX_512,
+} AVXLevel;
 
 typedef enum
 {
@@ -264,7 +253,10 @@ typedef struct
 		} x86;
 		struct
 		{
-			unsigned avx_level : 3;
+			AVXLevel avx_level : 3;
+			bool is_win64 : 1;
+			bool is_mingw64 : 1;
+			bool pass_int128_vector_in_mem : 1;
 		} x64;
 		struct
 		{

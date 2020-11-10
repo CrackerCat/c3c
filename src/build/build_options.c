@@ -57,6 +57,13 @@ static void usage(void)
 	OUTPUT("  -Os                   - Optimize for size.");
 	OUTPUT("  -O3                   - Aggressive optimization.");
 	OUTPUT("  --emit-llvm           - Emit LLVM IR as a .ll file per module.");
+	OUTPUT("");
+	OUTPUT("  -freg-struct-return   - Override default ABI to return small structs in registers.");
+	OUTPUT("  -fpcc-struct-return   - Override default ABI to return small structs on the stack.");
+	OUTPUT("  -fno-memcpy-pass      - Prevents compiler from doing a mem copy pass (for debug).");
+	OUTPUT("");
+	OUTPUT("  -msoft-float          - Use software floating point.");
+	OUTPUT("  -mno-soft-float       - Prevent use of software floating point.");
 }
 
 
@@ -204,6 +211,37 @@ static void parse_option()
 	{
 		case 'h':
 			break;
+		case 'f':
+			if (match_shortopt("freg-struct-return"))
+			{
+				build_options.feature.reg_struct_return = true;
+				break;
+			}
+			if (match_shortopt("fpcc-struct-return"))
+			{
+				build_options.feature.stack_struct_return = true;
+				break;
+			}
+			if (match_shortopt("fno-memcpy-pass"))
+			{
+				build_options.feature.no_memcpy_pass = true;
+				break;
+			}
+			FAIL_WITH_ERR("Unknown argument -%s.", &current_arg[1]);
+		case 'm':
+			if (match_shortopt("msoft-float"))
+			{
+				build_options.feature.soft_float = true;
+				build_options.feature.no_soft_float = false;
+				break;
+			}
+			if (match_shortopt("mno-soft-float"))
+			{
+				build_options.feature.soft_float = true;
+				build_options.feature.no_soft_float = false;
+				break;
+			}
+			FAIL_WITH_ERR("Cannot process the unknown command \"%s\".", current_arg);
 		case 'O':
 			if (build_options.optimization_level != OPTIMIZATION_NOT_SET)
 			{

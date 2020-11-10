@@ -6,6 +6,13 @@
 
 #define MIN_ABI_STACK_ALIGN 4
 
+static bool x86_update_free_regs(GenContext *context, Type *type);
+
+static inline bool is_register_sized(unsigned size)
+{
+	return size == 1 || size == 2 || size == 4 || size == 8;
+}
+
 static unsigned x86_stack_alignment(Type *type, unsigned alignment)
 {
 	// Less than ABI, use default
@@ -23,19 +30,17 @@ static unsigned x86_stack_alignment(Type *type, unsigned alignment)
 }
 
 
-static ABIArgInfo *x86_create_indirect_return_result(GenContext *context, Type *type, bool by_val)
+static ABIArgInfo *x86_create_indirect_result(GenContext *context, Type *type, ByReg by_reg)
 {
-	if (!by_val)
+	if (by_reg == BY_REG)
 	{
-		if (context->abi.int_registers)
-		{
-			context->abi.int_registers--;
-			if (!build_target.x86.is_mcu_api)
-			{
-				return create_abi_arg_indirect(type_abi_alignment(type), false, false, NULL);
-			}
-		}
-		return create_abi_arg_indirect(type_abi_alignment(type), true, false, NULL);
+		ABIArgInfo *info = abi_arg_new(ABI_ARG_INDIRECT);
+		if (!context->abi.int_registers) return info;
+
+		context->abi.int_registers--;
+		if (build_target.x86.is_mcu_api) return info;
+
+		return abi_arg_by_reg_attr(info);
 	}
 
 	// Compute alignment
@@ -43,43 +48,45 @@ static ABIArgInfo *x86_create_indirect_return_result(GenContext *context, Type *
 	unsigned stack_alignment = x86_stack_alignment(type, alignment);
 
 	// Default alignment
-	if (stack_alignment == 0)
-	{
-		return create_abi_arg_indirect(4, true, false, NULL);
-	}
+	if (stack_alignment == 0) stack_alignment = 4;
+
 	// Realign if alignment is greater.
-	bool realign = alignment > stack_alignment;
-	return create_abi_arg_indirect(stack_alignment, true, realign, NULL);
-}
-
-
-ABIArgInfo *create_indirect_return_x86(GenContext *context, Type *type)
-{
-	bool by_val = true;
-	if (context->abi.int_registers)
+	if (alignment > stack_alignment)
 	{
-		// Consume a register for the return.
-		context->abi.int_registers--;
-		by_val = build_target.x86.is_mcu_api;
+		return abi_arg_new_indirect_realigned(stack_alignment);
 	}
-	return create_abi_arg_indirect(type_abi_alignment(type), by_val, false, NULL);
+
+	return abi_arg_new(ABI_ARG_INDIRECT);
 }
 
-static bool x86_is_return_type_in_reg(Type *type)
+
+ABIArgInfo *create_indirect_return_x86(GenContext *context)
+{
+	ABIArgInfo *info = abi_arg_new(ABI_ARG_INDIRECT);
+	if (!context->abi.int_registers) return info;
+	// Consume a register for the return.
+	context->abi.int_registers--;
+	if (build_target.x86.is_mcu_api) return info;
+
+	return abi_arg_by_reg_attr(info);
+}
+
+static bool x86_should_return_type_in_reg(Type *type)
 {
 	type = type->canonical;
 	unsigned size = type_size(type);
-	if (build_target.x86.is_mcu_api)
+	if (build_target.x86.is_mcu_api && size > 8) return false;
+	if (!build_target.x86.is_mcu_api && !is_register_sized(size)) return false;
+
+	if (type->type_kind == TYPE_VECTOR)
 	{
-		if (size > 8) return false;
+		// 64 (and 128 bit) vectors are not returned as registers
+		return size != 8;
 	}
-	else
-	{
-		// Check if register sized.
-		if (size != 1 && size != 2 && size != 4 && size != 8) return false;
-	}
+
 	switch (type->type_kind)
 	{
+		case TYPE_VECTOR:
 		case TYPE_POISONED:
 		case TYPE_MEMBER:
 		case TYPE_VOID:
@@ -94,113 +101,159 @@ static bool x86_is_return_type_in_reg(Type *type)
 		case TYPE_POINTER:
 		case TYPE_TYPEID:
 		case TYPE_VARARRAY:
-			return true;
-		case TYPE_ARRAY:
-			return x86_is_return_type_in_reg(type->array.base);
 		case TYPE_ERR_UNION:
 		case TYPE_STRING:
 		case TYPE_SUBARRAY:
-			return false;
+		case TYPE_ERRTYPE:
+		case TYPE_COMPLEX:
+			return true;
+		case TYPE_ARRAY:
+			return x86_should_return_type_in_reg(type->array.base);
 		case TYPE_STRUCT:
 		case TYPE_UNION:
-		case TYPE_ERRTYPE:
 			// Handle below
 			break;
-			// TODO if we have a vector type then false
 	}
+	// If all can be passed in registers, then pass in register
+	// (remember we already limited the size!)
 	Decl** members = type->decl->strukt.members;
 	VECEACH (members, i)
 	{
-		if (!x86_is_return_type_in_reg(members[i]->type)) return false;
+		Type *member_type = members[i]->type;
+		if (type_is_empty_field(member_type, true)) continue;
+		if (!x86_should_return_type_in_reg(member_type)) return false;
 	}
 	return true;
 }
 
 ABIArgInfo *x86_classify_return(GenContext *context, Type *type)
 {
-	if (type == type_void) return create_abi_arg_ignore();
+	if (type == type_void)
+	{
+		return abi_arg_new(ABI_ARG_IGNORE);
+	}
 
 	Type *base = NULL;
 	unsigned elements = 0;
 	if (context->abi.call_convention == CALL_CONVENTION_VECTOR || context->abi.call_convention == CALL_CONVENTION_REGCALL)
 	{
-		if (type_is_homogenous_aggregate(type, &base, &elements)) return create_abi_arg_direct(NULL, 0, NULL, true);
+		// Pass in the normal way.
+		if (type_is_homogenous_aggregate(type, &base, &elements))
+		{
+			return abi_arg_new(ABI_ARG_DIRECT);
+		}
 	}
 
 	if (type_is_vector(type))
 	{
+		// On Darwin, vectors may be returned in registers.
 		if (build_target.x86.is_darwin_vector_abi)
 		{
 			unsigned size = type_size(type);
-			if (size == 16)
+			if (size == 128 / 8)
 			{
-				/** ABIArgInfo::getDirect(llvm::VectorType::get(
-                  llvm::Type::getInt64Ty(getVMContext()), 2)); */
-				TODO
+				// Special case, convert 128 bit vector to two 64 bit elements.
+				return abi_arg_new_direct_coerce(abi_type_new_plain(type_get_vector(type_long, 2)));
 			}
 			// Always return in register if it fits in a general purpose
 			// register, or if it is 64 bits and has a single element.
-			/*if ((size == 8 || size == 16 || size == 32) ||
-			    (size == 64 && ...  == 1))
-				return ABIArgInfo::getDirect(llvm::IntegerType::get(getVMContext(),
-				                                                    Size));*/
-			TODO
-			return create_indirect_return_x86(context, type);
+			if (size == 1 || size == 2 || size == 4 || (size == 8 && type->vector.len == 1))
+			{
+				return abi_arg_new_direct_coerce(abi_type_new_int_bits(size * 8));
+			}
+			return create_indirect_return_x86(context);
 		}
-		return create_abi_arg_direct(NULL, 0, NULL, true);
+		return abi_arg_new(ABI_ARG_DIRECT);
 	}
-	if (type_is_aggregate(type))
+
+	if (type_is_abi_aggregate(type))
 	{
 		// If we don't allow small structs in reg:
-		if (!build_target.x86.return_small_struct_in_reg_abi) return create_indirect_return_x86(context, type);
-		bool struct_like = type_is_structlike(type);
-
-		// Ignore empty structlikes.
-		if (struct_like && !vec_size(type->decl->strukt.members)) return create_abi_arg_ignore();
+		if (!build_target.x86.return_small_struct_in_reg_abi && !type_is_complex(type))
+		{
+			return create_indirect_return_x86(context);
+		}
+		// Ignore empty struct/unions
+		if (type_is_empty_union_struct(type, true))
+		{
+			return abi_arg_new(ABI_ARG_IGNORE);
+		}
 
 		// Check if we can return it in a register.
-		if (x86_is_return_type_in_reg(type))
+		if (x86_should_return_type_in_reg(type))
 		{
 			size_t size = type_size(type);
-			// Special case is floats and pointers in single element structs.
-			Type *single_element = type_find_single_element(type);
+			// Special case is floats and pointers in single element structs (except for MSVC)
+			Type *single_element = type_find_single_struct_element(type);
 			if (single_element)
 			{
-				if ((type_is_float(single_element) && !build_target.x86.is_win32_float_struct_abi)
-				    || (type_is_pointer(type)))
+				if ((type_is_float(single_element) && !build_target.x86.is_win32_float_struct_abi))
 				{
-					return create_abi_arg_direct(single_element, 0, NULL, true);
+					return abi_arg_new(ABI_ARG_EXPAND);
+				}
+				if (type_is_pointer(type))
+				{
+					return abi_arg_new(ABI_ARG_EXPAND);
 				}
 			}
-			// TODO this should generate stuff like i48?
-			return create_abi_arg_direct(type_unsigned_int_by_bitsize(size * 8), 0, NULL, true);
+			// This is not a single element struct, so we wrap it in an int.
+			return abi_arg_new_direct_coerce(abi_type_new_int_bits(size * 8));
 		}
-		return create_indirect_return_x86(context, type);
+		return create_indirect_return_x86(context);
 	}
+
+	// We lower the enums
 	type = type_lowering(type);
-	switch (type->type_kind)
+
+	// Is this small enough to need to be extended?
+	if (type_is_promotable_integer(type))
 	{
-		case TYPE_I8:
-		case TYPE_I16:
-		case TYPE_U8:
-		case TYPE_U16:
-		case TYPE_BOOL:
-			return create_abi_arg_extend(type);
-		default:
-			return create_abi_arg_direct(NULL, 0, NULL, true);
+		return abi_arg_new(ABI_ARG_DIRECT_INT_EXTEND);
 	}
+
+	// If we support something like int128, then this is an indirect return.
+	if (type_is_integer(type) && type->builtin.bitsize > 64) return create_indirect_return_x86(context);
+
+	// Otherwise we expect to just pass this nicely in the return.
+	return abi_arg_new(ABI_ARG_DIRECT);
 
 }
 
-static inline bool x86_should_aggregate_use_direct(GenContext *context, Type *type, bool *in_reg, bool *needs_padding)
+static inline bool x86_should_aggregate_use_direct(GenContext *context, Type *type, bool *needs_padding)
 {
-	// TODO
-	return false;
+	// On Windows, aggregates other than HFAs are never passed in registers, and
+	// they do not consume register slots. Homogenous floating-point aggregates
+	// (HFAs) have already been dealt with at this point.
+	if (build_target.x86.is_win32_float_struct_abi && type_is_abi_aggregate(type)) return false;
+
+	*needs_padding = false;
+
+	if (!x86_update_free_regs(context, type)) return false;
+
+	if (build_target.x86.is_mcu_api) return true;
+
+	switch (context->abi.call_convention)
+	{
+		case CALL_CONVENTION_FAST:
+		case CALL_CONVENTION_VECTOR:
+		case CALL_CONVENTION_REGCALL:
+			if (type_size(type) <= 4 && context->abi.int_registers)
+			{
+				*needs_padding = true;
+			}
+			return false;
+		default:
+			return true;
+	}
 }
 
 static inline bool x86_is_mmxtype(Type *type)
 {
-	TODO
+	// Return true if the type is an MMX type <2 x i32>, <4 x i16>, or <8 x i8>.
+	if (type->type_kind != TYPE_VECTOR) return false;
+	if (type_size(type->vector.base) >= 8) return false;
+	if (!type_is_integer(type->vector.base)) return false;
+	return type_size(type) == 8;
 }
 
 static inline bool x86_can_expand_indirect_arg(Type *type)
@@ -209,16 +262,17 @@ static inline bool x86_can_expand_indirect_arg(Type *type)
 	// stack) would have the equivalent layout if it was expanded into separate
 	// arguments. If so, we prefer to do the latter to avoid inhibiting
 	// optimizations.
-	if (!type_is_structlike(type)) return false;
+
+	// Error unions can always be expanded.
+	if (type->canonical->type_kind == TYPE_ERR_UNION) return true;
+
+	if (!type_is_union_struct(type)) return false;
+
 	size_t size = 0;
-
-	if (type->type_kind == TYPE_ERRTYPE) { TODO }
-
 	Decl **members = type->decl->strukt.members;
 	VECEACH(members, i)
 	{
 		Type *member_type = type_lowering(members[i]->type);
-		member_type = type_lowering(member_type);
 		switch (member_type->type_kind)
 		{
 			case TYPE_I32:
@@ -229,10 +283,12 @@ static inline bool x86_can_expand_indirect_arg(Type *type)
 			case TYPE_U64:
 			case TYPE_I64:
 			case TYPE_F64:
-				// Note, complex types would be fine if their element type are fine.
-				// in Clang.
 				size += 8;
 				break;
+			case TYPE_COMPLEX:
+				// Note, complex types would be fine if their element type are fine.
+				// in Clang.
+				TODO
 			default:
 				return false;
 		}
@@ -275,6 +331,14 @@ static bool x86_update_free_regs(GenContext *context, Type *type)
 	return true;
 }
 
+static ABIArgInfo *x86_create_direct_hva(Type *base_type, unsigned elements)
+{
+	assert(base_type);
+	ABIArgInfo *info = CALLOCS(ABIArgInfo);
+	info->kind = ABI_ARG_DIRECT_HVA;
+	return info;
+}
+
 static ABIArgInfo *x86_classify_argument(GenContext *context, Type *type)
 {
 	// FIXME: Set alignment on indirect arguments.
@@ -282,125 +346,147 @@ static ABIArgInfo *x86_classify_argument(GenContext *context, Type *type)
 	type = type_lowering(type);
 	Type *base = NULL;
 	unsigned elements = 0;
-	if (context->abi.call_convention == CALL_CONVENTION_REGCALL && type_is_homogenous_aggregate(type, &base, &elements))
+	bool is_reg_call = context->abi.call_convention == CALL_CONVENTION_REGCALL;
+	bool is_vec_call = context->abi.call_convention == CALL_CONVENTION_VECTOR;
+	bool is_fast_call = context->abi.call_convention == CALL_CONVENTION_FAST;
+	if ((is_vec_call || is_reg_call)
+		&& type_is_homogenous_aggregate(type, &base, &elements))
 	{
+		// We now know it's a float/double or a vector.
 		if (context->abi.sse_registers >= elements)
 		{
 			context->abi.sse_registers -= elements;
-			if (type_is_builtin(type->type_kind) || type_is_vector(type)) return create_abi_arg_direct(NULL, 0, NULL, true);
-			return create_abi_arg_expand();
+			if (is_vec_call) return x86_create_direct_hva(base, elements);
+
+			// If it doesn't need to expand
+			if (type_is_builtin(type->type_kind) || type->type_kind == TYPE_VECTOR)
+			{
+				return abi_arg_new(ABI_ARG_DIRECT);
+			}
+
+			// Otherwise just a normal expand.
+			return abi_arg_new(ABI_ARG_EXPAND);
 		}
-		return x86_create_indirect_return_result(context, type, false);
+		return x86_create_indirect_result(context, type, BY_REG);
 	}
 
+	unsigned size = type_size(type);
 
-	if (type_is_aggregate(type))
+	if (type_is_abi_aggregate(type))
 	{
-		if (!build_target.x86.is_win_api && type_is_empty(type))
+		// Ignore empty unions / structs on non-win.
+		if (!build_target.x86.is_win32_float_struct_abi && type_is_empty_union_struct(type, true))
 		{
-			return create_abi_arg_ignore();
+			return abi_arg_new(ABI_ARG_IGNORE);
 		}
 
 		bool needs_padding = false;
-		bool in_reg;
 
-		if (x86_should_aggregate_use_direct(context, type, &in_reg, &needs_padding))
+		if (x86_should_aggregate_use_direct(context, type, &needs_padding))
 		{
-			unsigned size_in_regs = (type_size(type) + 3) / 4;
-			TODO
-			/*
-					SmallVector<llvm::Type*, 3> Elements(SizeInRegs, Int32);
-			llvm::Type *Result = llvm::StructType::get(LLVMContext, Elements);
-			if (InReg)
-				return ABIArgInfo::getDirectInReg(Result);
-			else
-				return ABIArgInfo::getDirect(Result);*/
-
+			// Not in reg on MCU
+			ABIArgInfo *info = abi_arg_new_direct_coerce(abi_type_new_int_bits(32));
+			if (build_target.x86.is_mcu_api) return info;
+			return abi_arg_by_reg_attr(info);
 		}
 
-		Type *padding_type = needs_padding ? type_int : NULL;
-
+		// Pass over-aligned aggregates on Windows indirectly. This behavior was
+		// added in MSVC 2015.
+		if (build_target.x86.is_win32_float_struct_abi && type_abi_alignment(type) > 4)
+		{
+			return x86_create_indirect_result(context, type, BY_REG);
+		}
 		// Clang: Expand small (<= 128-bit) record types when we know that the stack layout
 		// of those arguments will match the struct. This is important because the
 		// LLVM backend isn't smart enough to remove byval, which inhibits many
 		// optimizations.
 		// Don't do this for the MCU if there are still free integer registers
 		// (see X86_64 ABI for full explanation).
-		if (type_size(type) < 4 * 4 && (!build_target.x86.is_mcu_api || context->abi.sse_registers) &&
+		if (size <= 128 / 8 && (!build_target.x86.is_mcu_api || !context->abi.int_registers) &&
 				x86_can_expand_indirect_arg(type))
 		{
-			bool pad;
 			switch (context->abi.call_convention)
 			{
 				case CALL_CONVENTION_REGCALL:
 				case CALL_CONVENTION_FAST:
 				case CALL_CONVENTION_VECTOR:
-					pad = true;
-					break;
+					return abi_arg_new_expand_padded(type);
 				default:
-					pad = false;
-					break;
+				{
+					return abi_arg_new(ABI_ARG_EXPAND);
+				}
 			}
-			return create_abi_expand(pad, padding_type);
 		}
-		return x86_create_indirect_return_result(context, type, true);
+		return x86_create_indirect_result(context, type, BY_NORMAL);
 	}
 
 	// Clang: On Darwin, some vectors are passed in memory, we handle this by passing
 	// it as an i8/i16/i32/i64.
-	if (type_is_vector(type))
+	if (type->type_kind == TYPE_VECTOR)
 	{
+		// On Windows, vectors are passed directly if registers are available, or
+		// indirectly if not. This avoids the need to align argument memory. Pass
+		// user-defined vector types larger than 512 bits indirectly for simplicity.
+		if (build_target.x86.is_win32_float_struct_abi)
+		{
+			if (size < 512 / 8 && context->abi.sse_registers)
+			{
+				context->abi.sse_registers--;
+				return abi_arg_by_reg_attr(abi_arg_new(ABI_ARG_DIRECT));
+			}
+			return x86_create_indirect_result(context, type, BY_REG);
+		}
 		if (build_target.x86.is_darwin_vector_abi)
 		{
-			unsigned size = type_size(type);
-			if ((size == 1 || size == 2 || size == 4) || (size == 8 && /* elements == 1 */ false))
+			if ((size == 1 || size == 2 || size == 4) || (size == 8 && type->vector.len == 1))
 			{
-				//return ABIArgInfo::getDirect(llvm::IntegerType::get(getVMContext(), Size));
-				TODO
+				return abi_arg_new_direct_coerce(abi_type_new_int_bits(size * 8));
 			}
 		}
 		if (x86_is_mmxtype(type))
 		{
-			// return ABIArgInfo::getDirect(llvm::IntegerType::get(getVMContext(), 64));
-			TODO
+			return abi_arg_new_direct_coerce(abi_type_new_int_bits(64));
 		}
 
-		return create_abi_arg_direct(NULL, 0, NULL, true);
+		// Send as a normal parameter
+		return abi_arg_new(ABI_ARG_DIRECT);
 	}
 
-	bool in_reg = false;
-	if (x86_update_free_regs(context, type)
-	    && !build_target.x86.is_mcu_api)
+	// We now handle primitives
+	ByReg by_val = BY_NORMAL;
+	if (x86_update_free_regs(context, type) && !build_target.x86.is_mcu_api)
 	{
 		switch (context->abi.call_convention)
 		{
 			case CALL_CONVENTION_FAST:
 			case CALL_CONVENTION_VECTOR:
 			case CALL_CONVENTION_REGCALL:
-				if (type_size(type) > 4) break;
-				in_reg = type_is_integer(type) || type_is_pointer(type);
+				if (size > 4) break;
+				by_val = type_is_integer(type) || type_is_pointer(type) ? BY_REG : BY_NORMAL;
 				break;
 			default:
-				in_reg = true;
+				by_val = BY_REG;
 				break;
 		}
 	}
 
-	switch (type->type_kind)
+	if (type_is_promotable_integer(type))
 	{
-		case TYPE_I8:
-		case TYPE_I16:
-		case TYPE_U8:
-		case TYPE_U16:
-		case TYPE_BOOL:
-			return in_reg ? create_abi_arg_extend_in_reg(type) : create_abi_arg_extend(type);
-		default:
-			return in_reg ? create_abi_arg_direct_in_reg() : create_abi_arg_direct(NULL, 0, NULL, true);
+		ABIArgInfo *info = abi_arg_new(ABI_ARG_DIRECT_INT_EXTEND);
+		if (by_val == BY_REG) info->attributes.by_reg = true;
+		return info;
 	}
+
+	// i128 etc on stack.
+	if (size > 8) x86_create_indirect_result(context, type, BY_REG);
+
+	ABIArgInfo *info = abi_arg_new(ABI_ARG_DIRECT);
+	if (by_val == BY_REG) info->attributes.by_reg = true;
+	return info;
 }
 
 
-static void x86_compute_vector_args(GenContext *context, ABIArgInfo ***args_infos, bool *used_in_alloca)
+static void x86_compute_vector_args(GenContext *context, ABIArgInfo ***args_infos)
 {
 	TODO
 }
@@ -413,6 +499,10 @@ void c_abi_func_create_x86(GenContext *context, FunctionSignature *signature)
 	{
 		case CALL_CONVENTION_NORMAL:
 		case CALL_CONVENTION_SYSCALL:
+			if (build_target.x86.is_win32_float_struct_abi)
+			{
+				context->abi.sse_registers = 3;
+			}
 			context->abi.int_registers = build_target.default_number_regs;
 			break;
 		case CALL_CONVENTION_REGCALL:
@@ -435,43 +525,18 @@ void c_abi_func_create_x86(GenContext *context, FunctionSignature *signature)
 		context->abi.int_registers = 3;
 	}
 
-	ABIArgInfo** args_infos = NULL;
-	vec_add(args_infos, x86_classify_return(context, signature->rtype->type));
-
-	bool used_in_alloca = false;
+	signature->ret_abi_info = x86_classify_return(context, signature->rtype->type);
 
 	if (context->abi.call_convention == CALL_CONVENTION_VECTOR)
 	{
-		x86_compute_vector_args(context, &args_infos, &used_in_alloca);
+		FATAL_ERROR("X86 vector call not supported");
 	}
 	else
 	{
 		Decl **params = signature->params;
 		VECEACH(params, i)
 		{
-			ABIArgInfo *info = x86_classify_argument(context, params[i]->type);
-			params[i]->abi_ref = info;
-			used_in_alloca |= (info->kind == ABI_ARG_ALLOCA);
+			params[i]->var.abi_info = x86_classify_argument(context, params[i]->type);
 		}
 	}
-
-	if (used_in_alloca)
-	{
-		TODO
-		// rewriteWithInAlloca(FI);
-	}
-
-	Type *return_type = signature->rtype->type->canonical;
-	int params = 0;
-	/*
-	if (signature->failable)
-	{
-		call_descriptor->failure = (CABIParam) { params++, CABI_PARAM_SRETURN };
-	}
-	// TODO support vectors when they're in the language
-	if (type_is_structlike(return_type) || type_size(return_type) > 64)
-	{
-		call_descriptor->return_value = (CABIParam) { params, !params ? CABI_PARAM_SRETURN : CABI_PARAM_SRETURN};
-	}
-	TODO*/
 }

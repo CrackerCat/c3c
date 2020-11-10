@@ -296,23 +296,16 @@ static inline void target_setup_x86_abi(void)
 		build_target.x86.is_darwin_vector_abi = true;
 	}
 	build_target.x86.use_soft_float = build_target.float_abi == FLOAT_ABI_SOFT;
+	// Build target override.
+	if (build_options.feature.soft_float) build_target.x86.use_soft_float = true;
+	if (build_options.feature.no_soft_float) build_target.x86.use_soft_float = false;
+
 	build_target.x86.is_win32_float_struct_abi = build_target.os == OS_TYPE_WIN32;
 	build_target.x86.is_mcu_api = build_target.os == OS_TYPE_ELFIAMCU;
 	if (build_target.environment_type == ENV_TYPE_CYGNUS
 	    || build_target.environment_type == ENV_TYPE_GNU)
 	{
 		build_target.x86.is_win32_float_struct_abi = false;
-	}
-	build_target.x86.return_small_struct_in_reg_abi = false;
-	switch (build_target.struct_return)
-	{
-		case STRUCT_RETURN_STACK:
-			return;
-		case STRUCT_RETURN_REGS:
-			build_target.x86.return_small_struct_in_reg_abi = true;
-			return;
-		case STRUCT_RETURN_DEFAULT:
-			break;
 	}
 	switch (build_target.os)
 	{
@@ -327,13 +320,29 @@ static inline void target_setup_x86_abi(void)
 		case OS_TYPE_OPENBSD:
 		case OS_TYPE_WIN32:
 			build_target.x86.return_small_struct_in_reg_abi = true;
-			return;
+			break;
 		default:
-			return;
+			break;
 	}
-
+	if (build_options.feature.reg_struct_return) build_target.x86.return_small_struct_in_reg_abi = true;
+	if (build_options.feature.stack_struct_return) build_target.x86.return_small_struct_in_reg_abi = false;
 }
 
+
+static inline void target_setup_x64_abi(void)
+{
+	build_target.abi = ABI_X64;
+	build_target.x64.avx_level = AVX;
+	build_target.x64.is_win64 = build_target.os == OS_TYPE_WIN32;
+	if (build_target.environment_type == ENV_TYPE_GNU)
+	{
+		build_target.x64.is_mingw64 = build_target.x64.is_win64;
+	}
+	if (build_target.os == OS_TYPE_LINUX || build_target.os == OS_TYPE_NETBSD)
+	{
+		build_target.x64.pass_int128_vector_in_mem = true;
+	}
+}
 
 void target_setup(void)
 {
@@ -468,21 +477,42 @@ void target_setup(void)
 
 	switch (build_target.arch)
 	{
+		case ARCH_TYPE_AARCH64_32:
+		case ARCH_TYPE_BPFEL:
+		case ARCH_TYPE_BPFEB:
+		case ARCH_TYPE_SPARCEL:
+		case ARCH_TYPE_LE64:
+		case ARCH_TYPE_AMDIL:
+		case ARCH_TYPE_AMDIL64:
+		case ARCH_TYPE_HSAIL:
+		case ARCH_TYPE_HSAIL64:
+		case ARCH_TYPE_KALIMBA:
+		case ARCH_TYPE_SHAVE:
+		case ARCH_TYPE_RSCRIPT32:
+		case ARCH_TYPE_RSCRIPT64:
 		case ARCH_TYPE_LE32:
-			build_target.abi = ABI_PNACL;
-			break;
 		case ARCH_TYPE_MIPS:
 		case ARCH_TYPE_MIPSEL:
-			build_target.mips.is_32_bit = true;
-			build_target.abi = build_target.os == OS_TYPE_NACL ? ABI_PNACL : ABI_MIPS;
-			break;
 		case ARCH_TYPE_MIPS64EL:
 		case ARCH_TYPE_MIPS64:
-			build_target.abi = ABI_MIPS;
-			build_target.mips.is_32_bit = false;
-			break;
 		case ARCH_TYPE_AVR:
-			build_target.abi = ABI_AVR;
+		case ARCH_TYPE_NVPTX64:
+		case ARCH_TYPE_NVPTX:
+		case ARCH_TYPE_MSP430:
+		case ARCH_TYPE_SYSTEMZ:
+		case ARCH_TYPE_TCELE:
+		case ARCH_TYPE_TCE:
+		case ARCH_TYPE_LANAI:
+		case ARCH_TYPE_HEXAGON:
+		case ARCH_TYPE_AMDGCN:
+		case ARCH_TYPE_R600:
+		case ARCH_TYPE_SPARC:
+		case ARCH_TYPE_SPARCV9:
+		case ARCH_TYPE_XCORE:
+		case ARCH_TYPE_ARC:
+		case ARCH_TYPE_SPIR64:
+		case ARCH_TYPE_SPIR:
+			FATAL_ERROR("Unsupported arch %s.", build_target.arch_name);
 			break;
 		case ARCH_TYPE_AARCH64:
 		case ARCH_TYPE_AARCH64_BE:
@@ -512,7 +542,7 @@ void target_setup(void)
 				{
 					FATAL_ERROR("PPC64 LE non-ELF not supported.");
 				}
-				build_target.abi = ABI_PPC64;
+				FATAL_ERROR("PPC64 not supported");
 			}
 			/** Here we need to have different codegen depending on elf version :( */
 			build_target.abi = ABI_PPC64_SVR4;
@@ -522,31 +552,17 @@ void target_setup(void)
 			/* todo enable if elfv1-qpx */
 			build_target.ppc64.has_qpx = false;
 			break;
-		case ARCH_TYPE_NVPTX64:
-		case ARCH_TYPE_NVPTX:
-			build_target.abi = ABI_NVPTX;
-			break;
-		case ARCH_TYPE_MSP430:
-			build_target.abi = ABI_MSP430;
-			break;
 		case ARCH_TYPE_RISCV64:
 		case ARCH_TYPE_RISCV32:
 			build_target.riscv.xlen = 0; // pointer width
 			build_target.riscv.abiflen = 32; // ends with f / d (64)
 			build_target.abi = ABI_RISCV;
 			TODO
-		case ARCH_TYPE_SYSTEMZ:
-			build_target.systemz.has_vector = false; // getTarget().getABI() == "vector"
-			build_target.abi = ABI_SYSTEMZ;
-			TODO
-		case ARCH_TYPE_TCELE:
-		case ARCH_TYPE_TCE:
-			build_target.abi = ABI_TCE;
-			break;
 		case ARCH_TYPE_X86:
 			target_setup_x86_abi();
 			break;
 		case ARCH_TYPE_X86_64:
+			target_setup_x64_abi();
 			build_target.x64.avx_level = 0; /* TODO */
 			if (build_target.os == OS_TYPE_WIN32)
 			{
@@ -555,48 +571,11 @@ void target_setup(void)
 			}
 			build_target.abi = ABI_X64;
 			break;
-		case ARCH_TYPE_LANAI:
-			build_target.abi = ABI_LANAI;
-			break;
-		case ARCH_TYPE_HEXAGON:
-			build_target.abi = ABI_HEXAGON;
-			break;
-		case ARCH_TYPE_AMDGCN:
-		case ARCH_TYPE_R600:
-			build_target.abi = ABI_AMDGPU;
-			break;
-		case ARCH_TYPE_SPARC:
-			build_target.abi = ABI_SPARC;
-			break;
-		case ARCH_TYPE_SPARCV9:
-			build_target.abi = ABI_SPARCV9;
-			break;;
-		case ARCH_TYPE_XCORE:
-			build_target.abi = ABI_XCORE;
-			break;
-		case ARCH_TYPE_ARC:
-			build_target.abi = ABI_ARC;
-			break;
-		case ARCH_TYPE_SPIR64:
-		case ARCH_TYPE_SPIR:
-			build_target.abi = ABI_SPIR;
 		case ARCH_TYPE_UNKNOWN:
-		case ARCH_TYPE_AARCH64_32:
-		case ARCH_TYPE_BPFEL:
-		case ARCH_TYPE_BPFEB:
-		case ARCH_TYPE_SPARCEL:
-		case ARCH_TYPE_LE64:
-		case ARCH_TYPE_AMDIL:
-		case ARCH_TYPE_AMDIL64:
-		case ARCH_TYPE_HSAIL:
-		case ARCH_TYPE_HSAIL64:
-		case ARCH_TYPE_KALIMBA:
-		case ARCH_TYPE_SHAVE:
-		case ARCH_TYPE_RSCRIPT32:
-		case ARCH_TYPE_RSCRIPT64:
 			build_target.abi = ABI_UNKNOWN;
 			break;
 	}
+	// TODO remove
 	builtin_setup(&build_target);
 }
 

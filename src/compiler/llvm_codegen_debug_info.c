@@ -147,14 +147,23 @@ LLVMMetadataRef gencontext_get_debug_type(GenContext *context, Type *type)
 		case TYPE_I16:
 		case TYPE_I32:
 		case TYPE_I64:
+		case TYPE_I128:
 			return gencontext_simple_debug_type(context, type, DW_ATE_signed);
 		case TYPE_U16:
 		case TYPE_U32:
 		case TYPE_U64:
+		case TYPE_U128:
 			return gencontext_simple_debug_type(context, type, DW_ATE_unsigned);
+		case TYPE_F16:
 		case TYPE_F32:
 		case TYPE_F64:
+		case TYPE_F128:
 			return gencontext_simple_debug_type(context, type, DW_ATE_float);
+		case TYPE_COMPLEX:
+			return gencontext_simple_debug_type(context, type, DW_ATE_complex_float);
+		case TYPE_VECTOR:
+			TODO
+			// LLVMDIBuilderCreateVectorType(context->builder, )
 		case TYPE_VOID:
 			return NULL;
 		case TYPE_POINTER:

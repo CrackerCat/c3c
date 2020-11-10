@@ -747,22 +747,16 @@ CastKind cast_to_bool_kind(Type *type)
 			return CAST_ERROR;
 		case TYPE_BOOL:
 			UNREACHABLE
-		case TYPE_IXX:
-		case TYPE_I8:
-		case TYPE_I16:
-		case TYPE_I32:
-		case TYPE_I64:
-		case TYPE_U8:
-		case TYPE_U16:
-		case TYPE_U32:
-		case TYPE_U64:
+		case ALL_INTS:
 			return CAST_INTBOOL;
-		case TYPE_F32:
-		case TYPE_F64:
-		case TYPE_FXX:
+		case TYPE_COMPLEX:
+			return CAST_CXBOOL;
+		case ALL_FLOATS:
 			return CAST_FPBOOL;
 		case TYPE_POINTER:
 			return CAST_PTRBOOL;
+		case TYPE_VECTOR:
+			return CAST_ERROR;
 	}
 	UNREACHABLE
 }
@@ -804,29 +798,21 @@ bool cast(Context *context, Expr *expr, Type *to_type, CastType cast_type)
 			if (canonical->type_kind == TYPE_POINTER) return xipt(context, expr, from_type, canonical, to_type, cast_type);
 			if (canonical->type_kind == TYPE_ENUM) return ixxen(context, expr, canonical, to_type, cast_type);
 			break;
-		case TYPE_I8:
-		case TYPE_I16:
-		case TYPE_I32:
-		case TYPE_I64:
+		case ALL_SIGNED_INTS:
 			if (type_is_unsigned_integer(canonical)) return siui(context, expr, canonical, to_type, cast_type);
 			if (type_is_signed_integer(canonical)) return sisi(context, expr, from_type, canonical, to_type, cast_type);
 			if (type_is_float(canonical)) return sifp(context, expr, canonical, to_type);
 			if (canonical == type_bool) return xibo(context, expr, canonical, to_type, cast_type);
 			if (canonical->type_kind == TYPE_POINTER) return xipt(context, expr, from_type, canonical, to_type, cast_type);
 			break;
-		case TYPE_U8:
-		case TYPE_U16:
-		case TYPE_U32:
-		case TYPE_U64:
+		case ALL_UNSIGNED_INTS:
 			if (type_is_unsigned_integer(canonical)) return uiui(context, expr, from_type, canonical, to_type, cast_type);
 			if (type_is_signed_integer(canonical)) return uisi(context, expr, from_type, canonical, to_type, cast_type);
 			if (type_is_float(canonical)) return uifp(context, expr, canonical, to_type);
 			if (canonical == type_bool) return xibo(context, expr, canonical, to_type, cast_type);
 			if (canonical->type_kind == TYPE_POINTER) return xipt(context, expr, from_type, canonical, to_type, cast_type);
 			break;
-		case TYPE_F32:
-		case TYPE_F64:
-		case TYPE_FXX:
+		case ALL_FLOATS:
 			// Compile time integers may convert into ints, floats, bools
 			if (from_type->type_kind == TYPE_FXX && expr->expr_kind != EXPR_CONST && !expr->reeval)
 			{
@@ -881,6 +867,10 @@ bool cast(Context *context, Expr *expr, Type *to_type, CastType cast_type)
 		case TYPE_SUBARRAY:
 			if (canonical->type_kind == TYPE_POINTER) return sapt(context, expr, from_type, canonical, to_type, cast_type);
 			break;
+		case TYPE_VECTOR:
+			TODO
+		case TYPE_COMPLEX:
+			TODO
 	}
 	if (cast_type == CAST_TYPE_OPTIONAL_IMPLICIT) return true;
 	return sema_type_mismatch(context, expr, canonical, cast_type);

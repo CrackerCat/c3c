@@ -70,129 +70,224 @@ typedef struct
 	CABIParam failure;
 } CallDescriptor;
 
-ABIArgInfo *create_abi_arg_indirect(unsigned alignment, bool by_val, bool realign, Type *padding)
+ABIArgInfo *abi_arg_new(ABIKind kind)
 {
 	ABIArgInfo *info = CALLOCS(ABIArgInfo);
-	info->indirect_alignment = alignment;
-	info->by_val = by_val;
-	info->realign = realign;
-	info->padding_type = padding;
-	info->kind = ABI_ARG_INDIRECT;
+	info->kind = kind;
 	return info;
 }
 
-ABIArgInfo *create_abi_expand(bool pad_in_reg, Type *padding)
+AbiType *abi_type_new_plain(Type *type)
 {
-	ABIArgInfo *info = CALLOCS(ABIArgInfo);
-	info->padding_type = padding;
-	info->padding_in_reg = pad_in_reg;
-	info->kind = ABI_ARG_EXPAND;
+	AbiType *abi_type = CALLOCS(AbiType);
+	abi_type->kind = ABI_TYPE_PLAIN;
+	abi_type->type = type;
+	return abi_type;
+}
+
+AbiType *abi_type_new_int_bits(unsigned bits)
+{
+	AbiType *abi_type = CALLOCS(AbiType);
+	abi_type->kind = ABI_TYPE_INT_BITS;
+	abi_type->int_bits = bits;
+	return abi_type;
+}
+
+bool abi_type_is_integer(AbiType *type)
+{
+	return type->kind == ABI_TYPE_INT_BITS || type_is_integer(type->type);
+}
+
+bool abi_type_is_float(AbiType *type)
+{
+	return type->kind != ABI_TYPE_INT_BITS && type_is_float(type->type);
+}
+
+bool abi_type_size(AbiType *type)
+{
+	switch (type->kind)
+	{
+		case ABI_TYPE_INT_BITS:
+			return type->int_bits / 8;
+		case ABI_TYPE_PLAIN:
+			return type_size(type->type);
+	}
+	UNREACHABLE;
+}
+
+bool abi_type_abi_alignment(AbiType *type)
+{
+	printf(">>>> %d\n", next_highest_power_of_2(24));
+	switch (type->kind)
+	{
+		case ABI_TYPE_INT_BITS:
+			return type_abi_alignment(type_unsigned_int_by_bitsize(next_highest_power_of_2(type->int_bits)));
+		case ABI_TYPE_PLAIN:
+			return type_abi_alignment(type->type);
+	}
+	UNREACHABLE;
+}
+
+bool abi_arg_is_indirect(ABIArgInfo *info)
+{
+	switch (info->kind)
+	{
+		case ABI_ARG_IGNORE:
+		case ABI_ARG_DIRECT:
+		case ABI_ARG_DIRECT_HVA:
+		case ABI_ARG_DIRECT_COERCE:
+		case ABI_ARG_DIRECT_INT_EXTEND:
+		case ABI_ARG_EXPAND:
+		case ABI_ARG_EXPAND_PADDED:
+		case ABI_ARG_DIRECT_PAIR:
+		case ABI_ARG_DIRECT_HIGH:
+			return false;
+		case ABI_ARG_INDIRECT:
+		case ABI_ARG_INDIRECT_REALIGNED:
+			return true;
+	}
+}
+
+ABIArgInfo *abi_arg_new_indirect_realigned(unsigned alignment)
+{
+	assert(alignment > 0);
+	ABIArgInfo *info = abi_arg_new(ABI_ARG_INDIRECT_REALIGNED);
+	info->realignment = alignment;
 	return info;
 }
 
-ABIArgInfo *create_abi_arg_direct(Type *type, unsigned offset, Type *padding, bool may_flatten)
+size_t expanded_size(ABIArgInfo *type_info, Type *type)
 {
-	ABIArgInfo *info = CALLOCS(ABIArgInfo);
-	info->coerce_to = type;
-	info->padding_type = padding;
-	info->direct_offset = offset;
-	info->kind = ABI_ARG_DIRECT;
-	info->may_flatten = may_flatten;
+	switch (type->type_kind)
+	{
+		case TYPE_TYPEDEF:
+			return expanded_size(type_info, type->canonical);
+		case TYPE_ARRAY:
+			return expanded_size(type_info, type->array.base) * type->array.len;
+		case TYPE_STRUCT:
+		{
+			Decl **members = type->decl->strukt.members;
+			size_t result = 0;
+			VECEACH(members, i)
+			{
+				members += expanded_size(type_info, members[i]->type);
+			}
+			return result;
+		}
+		case TYPE_UNION:
+		{
+			size_t largest = 0;
+			Type *largest_type = NULL;
+			Decl **members = type->decl->strukt.members;
+			VECEACH(members, i)
+			{
+				if (type_size(type) > largest)
+				{
+					largest = type_size(type);
+					type = type->canonical;
+				}
+			}
+			if (!largest) return 0;
+			return expanded_size(type_info, type);
+		}
+		// Type complex: return 2;
+		default:
+			return 1;
+	}
+}
+
+
+ABIArgInfo *abi_arg_new_direct_high(AbiType *high_type)
+{
+	ABIArgInfo *arg_info = abi_arg_new(ABI_ARG_DIRECT_HIGH);
+	arg_info->partial_type = high_type;
+	return arg_info;
+}
+
+ABIArgInfo *abi_arg_new_direct_pair(AbiType *low_type, AbiType *high_type, AbiType *low_extend)
+{
+	ABIArgInfo *arg_info = abi_arg_new(ABI_ARG_DIRECT_PAIR);
+	arg_info->direct_pair.low_extend_type = low_extend;
+	arg_info->direct_pair.high_type = high_type;
+	arg_info->direct_pair.low_type = low_type;
+	return arg_info;
+}
+
+ABIArgInfo *abi_arg_new_direct_coerce(AbiType *target_type)
+{
+	assert(target_type);
+	ABIArgInfo *info = abi_arg_new(ABI_ARG_DIRECT_COERCE);
+	info->direct_coerce_type = target_type;
 	return info;
 }
 
-ABIArgInfo *create_abi_arg_direct_in_reg(void)
+ABIArgInfo *abi_arg_new_expand_padded(Type *type)
 {
-	ABIArgInfo *info = create_abi_arg_direct(NULL, 0, NULL, true);
-	info->in_reg = true;
+	ABIArgInfo *info = abi_arg_new(ABI_ARG_EXPAND_PADDED);
+	info->padding_type = type;
 	return info;
 }
 
-ABIArgInfo *create_abi_arg_extend(Type *type)
-{
-	ABIArgInfo *info = CALLOCS(ABIArgInfo);
-	info->coerce_to = type_is_signed(type) ? type_int : type_uint;
-	info->direct_offset = 0;
-	info->padding_type = NULL;
-	info->kind = ABI_ARG_EXTEND;
-	return info;
-}
-
-ABIArgInfo *create_abi_arg_extend_in_reg(Type *type)
-{
-	ABIArgInfo *info = create_abi_arg_extend(type);
-	info->in_reg = true;
-	return info;
-}
-
-ABIArgInfo *create_abi_arg_expand()
-{
-	ABIArgInfo *info = CALLOCS(ABIArgInfo);
-	info->kind = ABI_ARG_EXPAND;
-	return info;
-}
-
-ABIArgInfo *create_abi_arg_ignore()
-{
-	ABIArgInfo *info = CALLOCS(ABIArgInfo);
-	info->kind = ABI_ARG_IGNORE;
-	return info;
-}
-
-
-bool c_abi_is_homogenous_aggregate(Type *type)
-{
-	return false;
-}
 
 ABIArgInfo *classify_return_type_default(Type *type)
 {
-	if (type == type_void) return create_abi_arg_ignore();
-
-	if (c_abi_is_homogenous_aggregate(type))
+	if (type == type_void)
 	{
-		return create_abi_arg_indirect(type_abi_alignment(type), true, false, NULL);
+		return abi_arg_new(ABI_ARG_IGNORE);
 	}
 
-	type = type_lowering(type);
-	switch (type->type_kind)
+	// Struct-likes are returned by sret
+	if (type_is_abi_aggregate(type))
 	{
-		case TYPE_I8:
-		case TYPE_I16:
-		case TYPE_U8:
-		case TYPE_U16:
-		case TYPE_BOOL:
-			return create_abi_arg_extend(type);
+		return abi_arg_new(ABI_ARG_INDIRECT);
+	}
+
+	// Otherwise do we have a type that needs promotion?
+	if (type_is_promotable_integer(type_lowering(type)))
+	{
+		return abi_arg_new(ABI_ARG_DIRECT_INT_EXTEND);
+	}
+
+	// No, then do a direct pass.
+	return abi_arg_new(ABI_ARG_DIRECT);
+}
+
+static LLVMValueRef llvm_enter_struct_pointer_for_coerced_access(GenContext *context, LLVMValueRef src_ptr, LLVMTypeRef *source_type, size_t dest_size)
+{
+	// We do not enter a zero element struct.
+	if (!LLVMCountStructElementTypes(*source_type)) return src_ptr;
+
+	LLVMTypeRef first_element_type = LLVMStructGetTypeAtIndex(*source_type, 0);
+	// Check if the first element
+	size_t first_element_size = LLVMStoreSizeOfType(target_data_layout(), first_element_type);
+	if (first_element_size < dest_size && first_element_size < LLVMStoreSizeOfType(target_data_layout(), *source_type))
+	{
+		// The first element is too small, so return the current pointer:
+		return src_ptr;
+	}
+	// GEP into the first element.
+	src_ptr = LLVMBuildStructGEP2(context->builder, first_element_type, src_ptr, 0, "dive");
+	*source_type = first_element_type;
+	// Recurse if it is a struct.
+	if (LLVMGetTypeKind(first_element_type) == LLVMStructTypeKind)
+	{
+		return llvm_enter_struct_pointer_for_coerced_access(context, src_ptr, source_type, dest_size);
+	}
+	return src_ptr;
+}
+
+
+void c_abi_func_create(GenContext *context, FunctionSignature *signature)
+{
+	switch (build_target.abi)
+	{
+		case ABI_X64:
+			c_abi_func_create_x64(context, signature);
+			break;
+		case ABI_X86:
 		default:
-			return create_abi_arg_direct(NULL, 0, NULL, true);
+			c_abi_func_create_x86(context, signature);
+			break;
 	}
 }
 
-
-
-void c_abi_func_create(GenContext *context, FunctionSignature *signature)
-{
-	/*
-	switch (c_abi_get_kind(signature->convention))
-	{
-		case WIN32_CDECL:
-			c_abi_func_create_x86(signature);
-		case WIN64_VEC_CC:
-	}*/
-}
-
-/*
-static c_abi_analyze_return(GenContext *context, Type *type)
-{
-}
-
-void c_abi_func_create(GenContext *context, FunctionSignature *signature)
-{
-	context->abi.args = 0;
-	context->abi.int_registers = 0;
-	context->abi.sse_registers = 0;
-	context->abi.simd_registers = 0;
-	CABIKind kind;
-	c_abi_analyze_return(context, signature->rtype->type);
-}
-*/

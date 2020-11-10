@@ -154,11 +154,28 @@ void gencontext_print_llvm_ir(GenContext *context)
 }
 
 
-LLVMValueRef gencontext_emit_alloca(GenContext *context, LLVMTypeRef type, const char *name)
+LLVMValueRef gencontext_emit_alloca(GenContext *context, LLVMTypeRef type, unsigned alignment, const char *name)
 {
 	LLVMBasicBlockRef current_block = LLVMGetInsertBlock(context->builder);
 	LLVMPositionBuilderBefore(context->builder, context->alloca_point);
-	LLVMValueRef alloca = LLVMBuildAlloca(context->builder, type, name);
+	LLVMValueRef alloca = LLVMBuildAlloca(context->builder, llvm_type_for_mem(context, type), name);
+	if (alignment) LLVMSetAlignment(alloca, alignment);
+	LLVMPositionBuilderAtEnd(context->builder, current_block);
+	return alloca;
+}
+
+LLVMValueRef gencontext_emit_alloca_aligned(GenContext *context, Type *type, const char *name)
+{
+	return gencontext_emit_alloca(context, llvm_type_for_mem(context, llvm_type(type)), type_alloca_alignment(type), name);
+}
+
+LLVMValueRef gencontext_emit_decl_alloca(GenContext *context, Decl *decl)
+{
+	LLVMBasicBlockRef current_block = LLVMGetInsertBlock(context->builder);
+	LLVMPositionBuilderBefore(context->builder, context->alloca_point);
+	LLVMTypeRef type = llvm_type(decl->type);
+	LLVMValueRef alloca = LLVMBuildAlloca(context->builder, llvm_type_for_mem(context, type), decl->name ?: "anon");
+	LLVMSetAlignment(alloca, decl->alignment ?: type_alloca_alignment(decl->type));
 	LLVMPositionBuilderAtEnd(context->builder, current_block);
 	return alloca;
 }
@@ -213,8 +230,12 @@ unsigned nounwind_attribute;
 unsigned writeonly_attribute;
 unsigned readonly_attribute;
 unsigned optnone_attribute;
+unsigned align_attribute;
 unsigned noalias_attribute;
 unsigned sret_attribute;
+unsigned zext_attribute;
+unsigned sext_attribute;
+unsigned byval_attribute;
 
 void llvm_codegen_setup()
 {
@@ -238,6 +259,10 @@ void llvm_codegen_setup()
 	optnone_attribute = lookup_attribute("optnone");
 	sret_attribute = lookup_attribute("sret");
 	noalias_attribute = lookup_attribute("noalias");
+	zext_attribute = lookup_attribute("zeroext");
+	sext_attribute = lookup_attribute("signext");
+	align_attribute = lookup_attribute("align");
+	byval_attribute = lookup_attribute("byval");
 	intrinsics_setup = true;
 }
 
@@ -372,7 +397,10 @@ void llvm_codegen(Context *context)
 	LLVMAddAnalysisPasses(target_machine(), pass_manager);
 	LLVMPassManagerBuilderPopulateModulePassManager(pass_manager_builder, pass_manager);
 	// We insert a memcpy pass here, or it will be used too late to fix our aggregate copies.
-	LLVMAddMemCpyOptPass(function_pass_manager);
+	if (!build_options.feature.no_memcpy_pass)
+	{
+		LLVMAddMemCpyOptPass(function_pass_manager);
+	}
 	LLVMPassManagerBuilderPopulateFunctionPassManager(pass_manager_builder, function_pass_manager);
 
 	// IMPROVE
@@ -407,8 +435,42 @@ void llvm_codegen(Context *context)
 	gencontext_destroy(&gen_context);
 }
 
+void gencontext_add_int_attribute(GenContext *context, LLVMValueRef value_to_add_attribute_to, unsigned attribute_id, uint64_t value, int index)
+{
+	LLVMAttributeRef llvm_attr = LLVMCreateEnumAttribute(context->context, attribute_id, value);
+	LLVMAddAttributeAtIndex(value_to_add_attribute_to, index, llvm_attr);
+}
+
 void gencontext_add_attribute(GenContext *context, LLVMValueRef value_to_add_attribute_to, unsigned attribute_id, int index)
 {
-	LLVMAttributeRef llvm_attr = LLVMCreateEnumAttribute(context->context, attribute_id, 0);
+	gencontext_add_int_attribute(context, value_to_add_attribute_to, attribute_id, 0, index);
+}
+
+void gencontext_add_string_attribute(GenContext *context, LLVMValueRef value_to_add_attribute_to, const char *attribute, const char *value, int index)
+{
+	LLVMAttributeRef llvm_attr = LLVMCreateStringAttribute(context->context, attribute, strlen(attribute), value, strlen(value));
 	LLVMAddAttributeAtIndex(value_to_add_attribute_to, index, llvm_attr);
+}
+
+
+
+LLVMTypeRef llvm_type_for_mem(GenContext *context, LLVMTypeRef type)
+{
+	if (LLVMInt1TypeInContext(context->context) == type) return LLVMInt8TypeInContext(context->context);
+	return type;
+}
+
+unsigned llvm_abi_size(LLVMTypeRef type)
+{
+	return LLVMABISizeOfType(target_data_layout(), type);
+}
+
+unsigned llvm_abi_alignment(LLVMTypeRef type)
+{
+	return LLVMABIAlignmentOfType(target_data_layout(), type);
+}
+
+unsigned llvm_store_size(LLVMTypeRef type)
+{
+	return LLVMStoreSizeOfType(target_data_layout(), type);
 }

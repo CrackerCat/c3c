@@ -39,10 +39,10 @@ static LLVMValueRef gencontext_emit_decl(GenContext *context, Ast *ast)
 	Decl *decl = ast->declare_stmt;
 
 	LLVMTypeRef alloc_type = llvm_type(type_lowering(decl->type));
-	decl->backend_ref = gencontext_emit_alloca(context, alloc_type, decl->name);
+	decl->backend_ref = gencontext_emit_decl_alloca(context, decl);
 	if (decl->var.failable)
 	{
-		decl->var.failable_ref = gencontext_emit_alloca(context, llvm_type(type_error), decl->name);
+		decl->var.failable_ref = gencontext_emit_alloca_aligned(context, type_error, decl->name);
 		LLVMBuildStore(context->builder, gencontext_emit_no_error_union(context), decl->var.failable_ref);
 	}
 	// TODO NRVO
@@ -162,7 +162,7 @@ static inline void gencontext_emit_return(GenContext *context, Ast *ast)
 	if (!in_expression_block && context->cur_func_decl->func.function_signature.failable)
 	{
 		error_return_block = gencontext_create_free_block(context, "errretblock");
-		error_out = gencontext_emit_alloca(context, llvm_type(type_error), "reterr");
+		error_out = gencontext_emit_alloca_aligned(context, type_error, "reterr");
 		context->error_var = error_out;
 		context->catch_block = error_return_block;
 	}
@@ -189,21 +189,13 @@ static inline void gencontext_emit_return(GenContext *context, Ast *ast)
 	}
 	else
 	{
-		if (context->return_out)
-		{
-			LLVMBuildStore(context->builder, ret_value, context->return_out);
-			gencontext_emit_implicit_return(context);
-		}
-		else
-		{
-			LLVMBuildRet(context->builder, ret_value);
-		}
+		gencontext_emit_return_abi(context, ret_value, NULL);
 	}
 	context->current_block = NULL;
 	if (error_return_block && LLVMGetFirstUse(LLVMBasicBlockAsValue(error_return_block)))
 	{
 		gencontext_emit_block(context, error_return_block);
-		LLVMBuildRet(context->builder, gencontext_emit_load(context, type_error, error_out));
+		gencontext_emit_return_abi(context, NULL, gencontext_emit_load(context, type_error, error_out));
 		context->current_block = NULL;
 	}
 	LLVMBasicBlockRef post_ret_block = gencontext_create_free_block(context, "ret");
@@ -614,7 +606,7 @@ void gencontext_emit_switch_body(GenContext *context, LLVMValueRef switch_value,
 
 
 	Type *switch_type = switch_ast->switch_stmt.cond->type;
-	LLVMValueRef switch_var = gencontext_emit_alloca(context, llvm_type(switch_type), "");
+	LLVMValueRef switch_var = gencontext_emit_alloca_aligned(context, switch_type, "switch");
 	switch_ast->switch_stmt.codegen.retry_var = switch_var;
 	LLVMBuildStore(context->builder, switch_value, switch_var);
 
@@ -912,7 +904,7 @@ void gencontext_emit_catch_stmt(GenContext *context, Ast *ast)
 	{
 		Decl *error_var = ast->catch_stmt.err_var;
 		assert(error_var->type->canonical == type_error);
-		error_result = gencontext_emit_alloca(context, llvm_type(type_error), error_var->name);
+		error_result = gencontext_emit_alloca_aligned(context, type_error, error_var->name);
 		error_var->backend_ref = error_result;
 		catch_expr = error_var->var.init_expr;
 
@@ -921,7 +913,7 @@ void gencontext_emit_catch_stmt(GenContext *context, Ast *ast)
 	{
 		if (ast->catch_stmt.is_switch)
 		{
-			error_result = gencontext_emit_alloca(context, llvm_type(type_error), "catchval");
+			error_result = gencontext_emit_alloca_aligned(context, type_error, "catchval");
 		}
 		catch_expr = ast->catch_stmt.catchable;
 	}

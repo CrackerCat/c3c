@@ -322,6 +322,12 @@ void fprint_type_recursive(Context *context, FILE *file, Type *type, int indent)
 	switch (type->type_kind)
 	{
 
+		case TYPE_COMPLEX:
+			DUMP("(type complex");
+			return;
+		case TYPE_VECTOR:
+			DUMP("(type vector");
+			return;
 		case TYPE_TYPEINFO:
 			DUMP("(type typeinfo)");
 			return;
@@ -371,16 +377,9 @@ void fprint_type_recursive(Context *context, FILE *file, Type *type, int indent)
 			DUMPEND();
 		case TYPE_VOID:
 		case TYPE_BOOL:
-		case TYPE_I8:
-		case TYPE_I16:
-		case TYPE_I32:
-		case TYPE_I64:
-		case TYPE_U8:
-		case TYPE_U16:
-		case TYPE_U32:
-		case TYPE_U64:
-		case TYPE_F32:
-		case TYPE_F64:
+		case ALL_SIGNED_INTS:
+		case ALL_UNSIGNED_INTS:
+		case ALL_REAL_FLOATS:
 			DUMPF("(%s)", type->name);
 			return;
 		case TYPE_IXX:
