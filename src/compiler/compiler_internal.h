@@ -347,6 +347,7 @@ typedef struct _FunctionSignature
 	bool failable : 1;
 	TypeInfo *rtype;
 	struct ABIArgInfo_ *ret_abi_info;
+	struct ABIArgInfo_ *failable_abi_info;
 	Decl** params;
 	const char *mangled_signature;
 } FunctionSignature;
@@ -471,6 +472,7 @@ typedef struct _Decl
 			};
 			union
 			{
+				// Unions, Errtype and Struct use strukt
 				StructDecl strukt;
 				EnumDecl enums;
 			};
@@ -1176,6 +1178,7 @@ extern Type *type_bool, *type_void, *type_string, *type_voidptr;
 extern Type *type_half, *type_float, *type_double, *type_quad;
 extern Type *type_char, *type_short, *type_int, *type_long, *type_isize;
 extern Type *type_byte, *type_ushort, *type_uint, *type_ulong, *type_usize;
+extern Type *type_u128, *type_i128;
 extern Type *type_compint, *type_compfloat;
 extern Type *type_c_short, *type_c_int, *type_c_long, *type_c_longlong;
 extern Type *type_c_ushort, *type_c_uint, *type_c_ulong, *type_c_ulonglong;
@@ -1323,6 +1326,7 @@ static inline bool decl_is_struct_type(Decl *decl)
 	DeclKind kind = decl->decl_kind;
 	return (kind == DECL_UNION) | (kind == DECL_STRUCT) | (kind == DECL_ERR);
 }
+unsigned decl_abi_alignment(Decl *decl);
 static inline DeclKind decl_from_token(TokenType type)
 {
 	if (type == TOKEN_STRUCT) return DECL_STRUCT;
@@ -1518,6 +1522,12 @@ static inline bool type_kind_is_derived(TypeKind kind)
 	}
 }
 
+static inline bool type_is_integer_kind(Type *type)
+{
+	assert(type == type->canonical);
+	return type->type_kind >= TYPE_BOOL && type->type_kind <= TYPE_U64;
+}
+
 /**
  * Check if this type is a promotable integer for the current
  * architecture.
@@ -1528,31 +1538,15 @@ static inline bool type_kind_is_derived(TypeKind kind)
 static inline bool type_is_promotable_integer(Type *type)
 {
 	// If we support other architectures, update this.
-	TypeKind kind = type->canonical->type_kind;
-	if (kind == TYPE_BOOL) return true;
-	return type_kind_is_any_integer(kind) && type->builtin.bytesize < type_int->builtin.bytesize;
+	return type_is_integer_kind(type) && type->builtin.bytesize < type_int->builtin.bytesize;
 }
 
 static inline Type *type_lowering(Type *type)
 {
 	Type *canonical = type->canonical;
 	if (canonical->type_kind == TYPE_ENUM) return canonical->decl->enums.type_info->type->canonical;
+	if (canonical->type_kind == TYPE_TYPEID) return type_usize->canonical;
 	return canonical;
-}
-
-static inline bool type_is_vector(Type *type)
-{
-	return false;
-}
-
-static inline bool type_is_structlike_with_vector(Type *type)
-{
-	return false;
-}
-
-static inline bool type_is_complex(Type *type)
-{
-	return false;
 }
 
 static inline bool type_is_structlike(Type *type)
@@ -1581,6 +1575,7 @@ static inline bool type_is_integer(Type *type)
 	assert(type == type->canonical);
 	return type->type_kind >= TYPE_I8 && type->type_kind <= TYPE_U64;
 }
+
 
 static inline bool type_is_any_integer(Type *type)
 {

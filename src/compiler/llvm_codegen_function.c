@@ -140,74 +140,92 @@ static LLVMValueRef gencontext_get_next_parameter(GenContext *context, unsigned 
 }
 
 
+static inline void gencontext_process_parameter_value(GenContext *context, Decl *decl, unsigned *index)
+{
+	ABIArgInfo *info = decl->var.abi_info;
+	switch (info->kind)
+	{
+		case ABI_ARG_IGNORE:
+			return;
+		case ABI_ARG_DIRECT:
+			llvm_store_aligned_decl(context, decl, gencontext_get_next_parameter(context, index));
+			return;
+		case ABI_ARG_INDIRECT:
+		{
+			// A simple memcopy, with alignment respected.
+			LLVMValueRef pointer = gencontext_get_next_parameter(context, index);
+			llvm_memcpy_to_decl(context, decl, pointer, info->indirect.realignment);
+			return;
+		}
+		case ABI_ARG_DIRECT_PAIR:
+		{
+			// Here we do the following transform:
+			// lo, hi -> { lo, hi } -> struct
+			LLVMTypeRef lo = llvm_abi_type(info->direct_pair.lo);
+			LLVMTypeRef hi = llvm_abi_type(info->direct_pair.hi);
+			LLVMTypeRef struct_type = gencontext_get_twostruct(context, lo, hi);
+			unsigned decl_alignment = decl_abi_alignment(decl);
+			// Cast to { lo, hi }
+			LLVMValueRef cast = LLVMBuildBitCast(context->builder, decl->backend_ref, LLVMPointerType(struct_type, 0), "pair");
+			// Point to the lo value.
+			LLVMValueRef lo_ptr = LLVMBuildStructGEP2(context->builder, struct_type, cast, 0, "lo");
+			// Store it in the struct.
+			unsigned lo_alignment = MIN(llvm_abi_alignment(lo), decl_alignment);
+			llvm_store_aligned(context, lo_ptr, gencontext_get_next_parameter(context, index), lo_alignment);
+			// Point to the hi value.
+			LLVMValueRef hi_ptr = LLVMBuildStructGEP2(context->builder, struct_type, cast, 1, "hi");
+			// Store it in the struct.
+			unsigned hi_alignment = MIN(llvm_abi_alignment(hi), decl_alignment);
+			llvm_store_aligned(context, hi_ptr, gencontext_get_next_parameter(context, index), decl_alignment);
+			return;
+		}
+		case ABI_ARG_DIRECT_COERCE:
+		{
+			LLVMTypeRef coerce_type = gencontext_get_coerce_type(context, info);
+			// Cast to the coerce type.
+			LLVMValueRef cast = LLVMBuildBitCast(context->builder, decl->backend_ref, LLVMPointerType(coerce_type, 0), "coerce");
+			unsigned decl_alignment = decl_abi_alignment(decl);
+
+			// If we're not flattening, we simply do a store.
+			if (!abi_info_should_flatten(info))
+			{
+				LLVMValueRef param = gencontext_get_next_parameter(context, index);
+				// Store it with the alignment of the decl.
+				llvm_store_aligned_decl(context, decl, param);
+				return;
+			}
+
+			// In this case we've been flattening the parameter into multiple registers.
+			LLVMTypeRef element_type = llvm_abi_type(info->direct_coerce.type);
+			// Store each expanded parameter.
+			for (unsigned idx = 0; idx < info->direct_coerce.elements; idx++)
+			{
+				LLVMValueRef element_ptr = LLVMBuildStructGEP2(context->builder, coerce_type, cast, idx, "");
+				LLVMValueRef value = gencontext_get_next_parameter(context, index);
+
+				llvm_store_aligned(context, element_ptr, value, MIN(llvm_abi_alignment(element_type), decl_alignment));
+			}
+			return;
+		}
+		case ABI_ARG_EXPAND:
+		{
+			gencontext_expand_from_args(context, decl->type, decl->backend_ref, index);
+			if (info->expand.padding_type)
+			{
+				// Skip the pad.
+				gencontext_get_next_parameter(context, index);
+			}
+		}
+	}
+}
 static inline void gencontext_emit_parameter(GenContext *context, Decl *decl, unsigned *index)
 {
 	assert(decl->decl_kind == DECL_VAR && decl->var.kind == VARDECL_PARAM);
 
-	ABIArgInfo *info = decl->var.abi_info;
 	const char *name = decl->name ? decl->name : "anon";
-	switch (info->kind)
-	{
-		case ABI_ARG_IGNORE:
-			// Allocate room on stack, but do not copy.
-			decl->backend_ref = gencontext_emit_decl_alloca(context, decl);
-			break;
-		case ABI_ARG_DIRECT_INT_EXTEND:
-		case ABI_ARG_DIRECT_HVA:
-		case ABI_ARG_DIRECT:
-			decl->backend_ref = gencontext_emit_decl_alloca(context, decl);
-			gencontext_emit_store(context, decl, gencontext_get_next_parameter(context, index));
-			break;
-		case ABI_ARG_INDIRECT_REALIGNED:
-		case ABI_ARG_INDIRECT:
-			{
-				LLVMValueRef pointer = gencontext_get_next_parameter(context, index);
-				LLVMValueRef load = gencontext_emit_load(context, decl->type, pointer);
-				if (info->kind == ABI_ARG_INDIRECT_REALIGNED)
-				{
-					LLVMSetAlignment(load, info->realignment);
-				}
-				decl->backend_ref = gencontext_emit_decl_alloca(context, decl);
-				gencontext_emit_store(context, decl, load);
-			}
-			break;
-		case ABI_ARG_EXPAND:
-			gencontext_expand_from_args(context, decl->type, decl->backend_ref = gencontext_emit_decl_alloca(context, decl), index);
-			break;
-		case ABI_ARG_DIRECT_COERCE:
-		{
-			decl->backend_ref = gencontext_emit_decl_alloca(context, decl);
-			LLVMValueRef param = gencontext_get_next_parameter(context, index);
-			LLVMValueRef coerced = gencontext_emit_convert_value_from_coerced(context, llvm_abi_type(info->direct_coerce_type),
-																	 param, decl->type);
-			gencontext_emit_store(context, decl, coerced);
-			break;
-		}
-		case ABI_ARG_DIRECT_PAIR:
-		{
-			// Todo - does extend work?
-			assert(!info->direct_pair.low_extend_type);
-			LLVMTypeRef low_type = llvm_abi_type(info->direct_pair.low_extend_type ?: info->direct_pair.low_type);
-			LLVMTypeRef hi_type = llvm_abi_type(info->direct_pair.high_type);
-			LLVMTypeRef ref[2] = { low_type, hi_type };
-			LLVMTypeRef type = LLVMStructTypeInContext(context->context, ref, 2, false);
-			LLVMValueRef direct = gencontext_emit_alloca(context, type, LLVMPreferredAlignmentOfType(target_data_layout(), type), "directpair");
-			LLVMValueRef lo_ptr = LLVMBuildStructGEP2(context->builder, type, direct, 0, "lo");
-			LLVMBuildStore(context->builder, gencontext_get_next_parameter(context, index), lo_ptr);
-			LLVMValueRef hi_ptr = LLVMBuildStructGEP2(context->builder, type, direct, 1, "hi");
-			LLVMBuildStore(context->builder, gencontext_get_next_parameter(context, index), hi_ptr);
-			LLVMValueRef struct_alloc = gencontext_emit_decl_alloca(context, decl);
-			LLVMValueRef bitcast = gencontext_emit_bitcast(context, direct, type_get_ptr(decl->type));
-			LLVMBuildMemCpy(context->builder, struct_alloc,
-				        LLVMGetAlignment(struct_alloc), bitcast, LLVMGetAlignment(direct),
-				        llvm_int(type_usize->canonical, type_size(decl->type)));
-			decl->backend_ref = struct_alloc;
-			break;
-		}
-		case ABI_ARG_EXPAND_PADDED:
-		case ABI_ARG_DIRECT_HIGH:
-			TODO
-	}
+	// Allocate room on stack, but do not copy.
+	decl->backend_ref = gencontext_emit_decl_alloca(context, decl);
+	gencontext_process_parameter_value(context, decl, index);
 	if (gencontext_use_debug(context))
 	{
 		SourceLocation *loc = TOKLOC(decl->span.loc);
@@ -255,33 +273,30 @@ void gencontext_emit_return_abi(GenContext *context, LLVMValueRef return_value, 
 
 	switch (info->kind)
 	{
-		case ABI_ARG_DIRECT_HVA:
-			TODO
 		case ABI_ARG_INDIRECT:
 			LLVMBuildStore(context->builder, return_value, return_out);
+			if (info->indirect.realignment) TODO
 			gencontext_emit_return_value(context, NULL);
 			return;
 		case ABI_ARG_IGNORE:
 			gencontext_emit_return_value(context, NULL);
 			return;
 		case ABI_ARG_EXPAND:
-		case ABI_ARG_EXPAND_PADDED:
 			// Expands to multiple slots -
 			// Not applicable to return values.
 			UNREACHABLE
+		case ABI_ARG_DIRECT_PAIR:
 		case ABI_ARG_DIRECT_COERCE:
-			gencontext_emit_return_value(context, gencontext_emit_convert_value_to_coerced(context, llvm_abi_type(info->direct_coerce_type), return_value, return_type));
+		{
+			assert(!abi_info_should_flatten(info));
+			LLVMTypeRef coerce_type = gencontext_get_coerce_type(context, info);
+			gencontext_emit_return_value(context, gencontext_emit_convert_value_to_coerced(context, coerce_type, return_value, return_type));
 			return;
+		}
 		case ABI_ARG_DIRECT:
 			// The normal return
 			gencontext_emit_return_value(context, return_value);
 			return;
-		case ABI_ARG_DIRECT_INT_EXTEND:
-		case ABI_ARG_INDIRECT_REALIGNED:
-			TODO
-		case ABI_ARG_DIRECT_PAIR:
-		case ABI_ARG_DIRECT_HIGH:
-			TODO
 	}
 	assert(return_value);
 	Type *coerce_type = info->coerce_type;
@@ -430,6 +445,51 @@ void gencontext_emit_function_body(GenContext *context, Decl *decl)
 	context->function = prev_function;
 }
 
+void gencontext_emit_param_attributes(GenContext *context, LLVMValueRef function, ABIArgInfo *info, bool is_return, int index, int last_index)
+{
+	assert(last_index == index || info->kind == ABI_ARG_DIRECT_PAIR || info->kind == ABI_ARG_IGNORE
+	       || info->kind == ABI_ARG_EXPAND);
+
+	if (info->attributes.zeroext)
+	{
+		// Direct only
+		assert(index == last_index);
+		gencontext_add_attribute(context, function, zext_attribute, index);
+	}
+	if (info->attributes.signext)
+	{
+		// Direct only
+		assert(index == last_index);
+		gencontext_add_attribute(context, function, sext_attribute, index);
+	}
+	switch (info->kind)
+	{
+		case ABI_ARG_EXPAND:
+		case ABI_ARG_IGNORE:
+		case ABI_ARG_DIRECT:
+		case ABI_ARG_DIRECT_COERCE:
+		case ABI_ARG_DIRECT_PAIR:
+			break;
+		case ABI_ARG_INDIRECT:
+			if (info->indirect.realignment)
+			{
+				gencontext_add_int_attribute(context, function, align_attribute, info->indirect.realignment, index);
+			}
+			if (is_return)
+			{
+				gencontext_add_attribute(context, function, sret_attribute, index);
+			}
+			else
+			{
+				// TODO then type attributes are added to LLVM-C, use that for byval.
+				if (info->indirect.by_val) gencontext_add_attribute(context, function, byval_attribute, index);
+				gencontext_add_attribute(context, function, noalias_attribute, index);
+			}
+			break;
+
+	}
+
+}
 void gencontext_emit_function_decl(GenContext *context, Decl *decl)
 {
 	assert(decl->decl_kind == DECL_FUNC);
@@ -437,56 +497,19 @@ void gencontext_emit_function_decl(GenContext *context, Decl *decl)
 	LLVMValueRef function = LLVMAddFunction(context->module, decl->cname ?: decl->external_name, llvm_type(decl->type));
 	decl->backend_ref = function;
 	FunctionSignature *signature = &decl->func.function_signature;
-	ABIArgInfo *ret_abi_info = signature->ret_abi_info;
-	switch (ret_abi_info->kind)
-	{
-		case ABI_ARG_EXPAND:
-		case ABI_ARG_EXPAND_PADDED:
-			UNREACHABLE
-		case ABI_ARG_IGNORE:
-		case ABI_ARG_DIRECT:
-		case ABI_ARG_DIRECT_COERCE:
-			break;
-		case ABI_ARG_DIRECT_INT_EXTEND:
-			gencontext_add_attribute(context, function, type_is_signed(signature->rtype->type) ? sext_attribute : zext_attribute, 0);
-			break;
-		case ABI_ARG_DIRECT_HVA:
-		case ABI_ARG_DIRECT_HIGH:
-		case ABI_ARG_DIRECT_PAIR:
-			break;
-		case ABI_ARG_INDIRECT_REALIGNED:
-			gencontext_add_int_attribute(context, function, align_attribute, ret_abi_info->realignment, 1);
-			FALLTHROUGH;
-		case ABI_ARG_INDIRECT:
-			if (!decl->func.function_signature.failable)
-			{
-				gencontext_add_attribute(context, function, sret_attribute, 1);
-			}
-			gencontext_add_attribute(context, function, noalias_attribute, 1);
-
-	}
+	ABIArgInfo *ret_abi_info = signature->failable_abi_info ?: signature->ret_abi_info;
+	gencontext_emit_param_attributes(context, function, ret_abi_info, true, 1, 1);
 	Decl **params = signature->params;
+	if (signature->failable_abi_info && signature->ret_abi_info)
+	{
+		ABIArgInfo *info = signature->ret_abi_info;
+		gencontext_emit_param_attributes(context, function, info, false, info->param_index_start + 1, info->param_index_end);
+	}
 	VECEACH(params, i)
 	{
 		Decl *param = params[i];
 		ABIArgInfo *info = param->var.abi_info;
-		unsigned index = info->param_index_start + 1;
-		switch (info->kind)
-		{
-			case ABI_ARG_INDIRECT_REALIGNED:
-				gencontext_add_int_attribute(context, function, align_attribute, info->realignment, (int)index);
-				FALLTHROUGH;
-			case ABI_ARG_INDIRECT:
-				// TODO then type attributes are added to LLVM-C, use that for byval.
-				gencontext_add_attribute(context, function, byval_attribute, (int)index);
-				break;
-			case ABI_ARG_DIRECT_INT_EXTEND:
-				gencontext_add_attribute(context, function, type_is_signed(param->type) ? sext_attribute : zext_attribute, (int)index);
-				break;
-				// Do byval etc
-			default:
-				break;
-		}
+		gencontext_emit_param_attributes(context, function, info, false, info->param_index_start + 1, info->param_index_end);
 	}
 	if (decl->func.attr_inline)
 	{

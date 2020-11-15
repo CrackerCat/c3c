@@ -374,3 +374,7 @@ char *strcopy(const char *start, size_t len);
   typeof(_b) __b__ = (_b); \
   __a__ > __b__ ? __a__ : __b__; })
 
+#define MIN(_a, _b) ({ \
+  typeof(_a) __a__ = (_a); \
+  typeof(_b) __b__ = (_b); \
+  __a__ < __b__ ? __a__ : __b__; })

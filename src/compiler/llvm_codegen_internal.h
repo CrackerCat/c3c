@@ -33,14 +33,9 @@ typedef enum
 	ABI_ARG_IGNORE,
 	ABI_ARG_DIRECT,
 	ABI_ARG_DIRECT_PAIR,
-	ABI_ARG_DIRECT_HIGH,
-	ABI_ARG_DIRECT_HVA,
 	ABI_ARG_DIRECT_COERCE,
-	ABI_ARG_DIRECT_INT_EXTEND,
 	ABI_ARG_INDIRECT,
-	ABI_ARG_INDIRECT_REALIGNED,
 	ABI_ARG_EXPAND,
-	ABI_ARG_EXPAND_PADDED,
 }  ABIKind;
 
 typedef enum
@@ -61,24 +56,27 @@ typedef struct
 
 typedef struct ABIArgInfo_
 {
-	unsigned param_index_start;
+	unsigned param_index_start : 16;
+	unsigned param_index_end : 16;
 	ABIKind kind : 6;
 	struct
 	{
 		bool by_reg : 1;
+		bool zeroext : 1;
+		bool signext : 1;
 	} attributes;
 	union
 	{
 		struct
 		{
-			AbiType *low_extend_type;
-			AbiType *high_type;
-			AbiType *low_type;
-		} direct_pair;
+			bool padding_by_reg : 1;
+			Type *padding_type;
+		} expand;
 		struct
 		{
-			unsigned byte_size;
-		} direct_coerce_int_sized;
+			AbiType *lo;
+			AbiType *hi;
+		} direct_pair;
 		struct
 		{
 			union
@@ -93,16 +91,16 @@ typedef struct ABIArgInfo_
 		};
 		struct
 		{
-			Type* padding_type;
-		};
+			AbiType *type;
+			unsigned elements : 3;
+			bool prevent_flatten : 1;
+		} direct_coerce;
 		struct
 		{
-			AbiType *direct_coerce_type;
-		};
-		struct
-		{
-			unsigned realignment;
-		};
+			// We may request a certain alignment of the parameters.
+			unsigned realignment : 16;
+			bool by_val : 1;
+		} indirect;
 	};
 
 } ABIArgInfo;
@@ -200,11 +198,18 @@ extern unsigned zext_attribute;
 extern unsigned sext_attribute;
 // ByVal (param)
 extern unsigned byval_attribute;
+// inreg (param)
+extern unsigned inreg_attribute;
 
 void gencontext_begin_module(GenContext *context);
 void gencontext_end_module(GenContext *context);
 
+static inline bool abi_info_should_flatten(ABIArgInfo *info)
+{
+	return info->kind == ABI_ARG_DIRECT_COERCE && info->direct_coerce.elements > 1U && !info->direct_coerce.prevent_flatten;
+}
 
+void gencontext_add_attribute_range(GenContext *context, LLVMValueRef value_to_add_attribute_to, unsigned attribute_id, int index_start, int index_end);
 void gencontext_add_attribute(GenContext *context, LLVMValueRef value_to_add_attribute_to, unsigned attribute_id, int index);
 void gencontext_add_string_attribute(GenContext *context, LLVMValueRef value_to_add_attribute_to, const char *attribute, const char *value, int index);
 void gencontext_add_int_attribute(GenContext *context, LLVMValueRef value_to_add_attribute_to, unsigned attribute_id, uint64_t val, int index);
@@ -270,6 +275,10 @@ static inline LLVMBasicBlockRef gencontext_current_block_if_in_use(GenContext *c
 
 unsigned llvm_abi_size(LLVMTypeRef type);
 unsigned llvm_abi_alignment(LLVMTypeRef type);
+void llvm_store_aligned(GenContext *context, LLVMValueRef pointer, LLVMValueRef value, unsigned alignment);
+void llvm_store_aligned_decl(GenContext *context, Decl *decl, LLVMValueRef value);
+void llvm_memcpy_to_decl(GenContext *context, Decl *decl, LLVMValueRef source, unsigned source_alignment);
+LLVMValueRef gencontext_emit_load_aligned(GenContext *context, LLVMTypeRef type, LLVMValueRef pointer, unsigned alignment, const char *name);
 unsigned llvm_store_size(LLVMTypeRef type);
 LLVMTypeRef llvm_type_for_mem(GenContext *context, LLVMTypeRef type);
 void gencontext_emit_function_body(GenContext *context, Decl *decl);
@@ -279,6 +288,9 @@ void gencontext_emit_function_decl(GenContext *context, Decl *decl);
 void gencontext_emit_extern_decl(GenContext *context, Decl *decl);
 LLVMValueRef gencontext_emit_address(GenContext *context, Expr *expr);
 LLVMTypeRef gencontext_get_llvm_type(GenContext *context, Type *type);
+LLVMTypeRef gencontext_get_twostruct_abi_type(GenContext *context, AbiType *lo, AbiType *hi);
+LLVMTypeRef gencontext_get_coerce_type(GenContext *context, ABIArgInfo *arg_info);
+LLVMTypeRef gencontext_get_twostruct(GenContext *context, LLVMTypeRef lo, LLVMTypeRef hi);
 LLVMTypeRef gencontext_get_llvm_abi_type(GenContext *context, AbiType *type);
 LLVMValueRef gencontext_emit_convert_value_to_coerced(GenContext *context, LLVMTypeRef coerced, LLVMValueRef value, Type *original_type);
 LLVMValueRef gencontext_emit_convert_value_from_coerced(GenContext *context, LLVMTypeRef coerced, LLVMValueRef value, Type *original_type);
@@ -396,6 +408,7 @@ static inline LLVMCallConv llvm_call_convention_from_call(CallABI abi)
 
 }
 
+#define llvm_ptr_type(type) gencontext_get_llvm_type(context, type_get_ptr(type))
 #define llvm_type(type) gencontext_get_llvm_type(context, type)
 #define llvm_abi_type(type) gencontext_get_llvm_abi_type(context, type)
 #define llvm_debug_type(type) gencontext_get_debug_type(context, type)

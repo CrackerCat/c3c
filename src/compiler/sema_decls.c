@@ -101,7 +101,8 @@ static bool sema_analyse_struct_union(Context *context, Decl *decl)
 
 	DEBUG_LOG("Beginning analysis of %s.", decl->name ? decl->name : "anon");
 	size_t offset = 0;
-	size_t alignment = 0;
+	// Default alignment is 1.
+	size_t alignment = 1;
 	size_t size = 0;
 	if (decl->name) context_push_scope(context);
 	VECEACH(decl->strukt.members, i)

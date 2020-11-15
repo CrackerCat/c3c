@@ -159,7 +159,7 @@ LLVMValueRef gencontext_emit_alloca(GenContext *context, LLVMTypeRef type, unsig
 	LLVMBasicBlockRef current_block = LLVMGetInsertBlock(context->builder);
 	LLVMPositionBuilderBefore(context->builder, context->alloca_point);
 	LLVMValueRef alloca = LLVMBuildAlloca(context->builder, llvm_type_for_mem(context, type), name);
-	if (alignment) LLVMSetAlignment(alloca, alignment);
+	LLVMSetAlignment(alloca, alignment ?: llvm_abi_alignment(type));
 	LLVMPositionBuilderAtEnd(context->builder, current_block);
 	return alloca;
 }
@@ -171,13 +171,11 @@ LLVMValueRef gencontext_emit_alloca_aligned(GenContext *context, Type *type, con
 
 LLVMValueRef gencontext_emit_decl_alloca(GenContext *context, Decl *decl)
 {
-	LLVMBasicBlockRef current_block = LLVMGetInsertBlock(context->builder);
-	LLVMPositionBuilderBefore(context->builder, context->alloca_point);
 	LLVMTypeRef type = llvm_type(decl->type);
-	LLVMValueRef alloca = LLVMBuildAlloca(context->builder, llvm_type_for_mem(context, type), decl->name ?: "anon");
-	LLVMSetAlignment(alloca, decl->alignment ?: type_alloca_alignment(decl->type));
-	LLVMPositionBuilderAtEnd(context->builder, current_block);
-	return alloca;
+	return gencontext_emit_alloca(context,
+							   llvm_type_for_mem(context, type),
+							   decl->alignment ?: type_alloca_alignment(decl->type),
+							   decl->name ?: "anon");
 }
 
 /**
@@ -236,6 +234,7 @@ unsigned sret_attribute;
 unsigned zext_attribute;
 unsigned sext_attribute;
 unsigned byval_attribute;
+unsigned inreg_attribute;
 
 void llvm_codegen_setup()
 {
@@ -263,6 +262,7 @@ void llvm_codegen_setup()
 	sext_attribute = lookup_attribute("signext");
 	align_attribute = lookup_attribute("align");
 	byval_attribute = lookup_attribute("byval");
+	inreg_attribute = lookup_attribute("inreg");
 	intrinsics_setup = true;
 }
 
@@ -446,6 +446,14 @@ void gencontext_add_attribute(GenContext *context, LLVMValueRef value_to_add_att
 	gencontext_add_int_attribute(context, value_to_add_attribute_to, attribute_id, 0, index);
 }
 
+void gencontext_add_attribute_range(GenContext *context, LLVMValueRef value_to_add_attribute_to, unsigned attribute_id, int index_start, int index_end)
+{
+	for (int i = index_start; i <= index_end; i++)
+	{
+		gencontext_add_int_attribute(context, value_to_add_attribute_to, attribute_id, 0, i);
+	}
+}
+
 void gencontext_add_string_attribute(GenContext *context, LLVMValueRef value_to_add_attribute_to, const char *attribute, const char *value, int index)
 {
 	LLVMAttributeRef llvm_attr = LLVMCreateStringAttribute(context->context, attribute, strlen(attribute), value, strlen(value));
@@ -468,6 +476,31 @@ unsigned llvm_abi_size(LLVMTypeRef type)
 unsigned llvm_abi_alignment(LLVMTypeRef type)
 {
 	return LLVMABIAlignmentOfType(target_data_layout(), type);
+}
+
+void llvm_store_aligned(GenContext *context, LLVMValueRef pointer, LLVMValueRef value, unsigned alignment)
+{
+	LLVMValueRef ref = LLVMBuildStore(context->builder, value, pointer);
+	LLVMSetAlignment(ref, alignment);
+}
+
+void llvm_store_aligned_decl(GenContext *context, Decl *decl, LLVMValueRef value)
+{
+	llvm_store_aligned(context, decl->backend_ref, value, decl->alignment);
+}
+
+void llvm_memcpy_to_decl(GenContext *context, Decl *decl, LLVMValueRef source, unsigned source_alignment)
+{
+	if (source_alignment == 0) source_alignment = type_abi_alignment(decl->type);
+	LLVMBuildMemCpy(context->builder, decl->backend_ref, decl->alignment ?: type_abi_alignment(decl->type),
+	                source, source_alignment, llvm_int(type_usize, type_size(decl->type)));
+}
+
+LLVMValueRef gencontext_emit_load_aligned(GenContext *context, LLVMTypeRef type, LLVMValueRef pointer, unsigned alignment, const char *name)
+{
+	LLVMValueRef value = LLVMBuildLoad2(context->builder, type, pointer, name);
+	LLVMSetAlignment(value, alignment ?: llvm_abi_alignment(type));
+	return value;
 }
 
 unsigned llvm_store_size(LLVMTypeRef type)

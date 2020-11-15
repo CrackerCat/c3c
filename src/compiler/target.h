@@ -184,12 +184,6 @@ typedef enum
 	ABI_RISCV,
 } ABI;
 
-typedef enum
-{
-	STRUCT_RETURN_DEFAULT,
-	STRUCT_RETURN_STACK,
-	STRUCT_RETURN_REGS,
-} StructReturn;
 
 typedef enum
 {
@@ -237,7 +231,6 @@ typedef struct
 	ObjectFormatType object_format;
 	int alloca_address_space;
 	ABI abi;
-	StructReturn struct_return : 3;
 	FloatABI float_abi : 3;
 	unsigned default_number_regs : 8;
 	union
@@ -262,6 +255,11 @@ typedef struct
 		{
 			bool is_32_bit : 1;
 		} mips;
+		struct
+		{
+			bool is_aapcs : 1;
+			bool is_darwin_pcs : 1;
+		} aarch64;
 		struct
 		{
 			bool is_darwin : 1;
@@ -308,6 +306,7 @@ typedef struct
 	unsigned align_pref_short;
 	unsigned align_pref_int;
 	unsigned align_pref_long;
+	unsigned align_pref_i128;
 	unsigned align_pref_half;
 	unsigned align_pref_float;
 	unsigned align_pref_double;

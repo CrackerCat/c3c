@@ -42,19 +42,21 @@ static inline LLVMValueRef gencontext_emit_add_int(GenContext *context, Type *ty
 LLVMValueRef gencontext_emit_convert_value_to_coerced(GenContext *context, LLVMTypeRef coerced, LLVMValueRef value, Type *original_type)
 {
 	// Must be the same size.
-	assert(type_size(original_type) == LLVMABISizeOfType(target_data_layout(), coerced));
-	LLVMValueRef temp = gencontext_emit_alloca_aligned(context, original_type, "coercetemp");
-	LLVMBuildStore(context->builder, value, temp);
-	temp = LLVMBuildBitCast(context->builder, temp, LLVMPointerType(coerced, 0), "");
-	return LLVMBuildLoad2(context->builder, coerced, temp, "coerced");
+	assert(type_size(original_type) <= llvm_abi_size(coerced));
+	unsigned max_align = MAX(type_abi_alignment(original_type), llvm_abi_alignment(coerced));
+	LLVMValueRef temp = gencontext_emit_alloca_aligned(context, original_type, "tempcoerce1");
+	llvm_store_aligned(context, temp, value, max_align);
+	LLVMValueRef cast = LLVMBuildBitCast(context->builder, temp, LLVMPointerType(coerced, 0), "");
+	return gencontext_emit_load_aligned(context, coerced, cast, max_align, "coerced");
 }
 
 LLVMValueRef gencontext_emit_convert_value_from_coerced(GenContext *context, LLVMTypeRef coerced, LLVMValueRef value, Type *original_type)
 {
-	LLVMValueRef temp = gencontext_emit_alloca(context, coerced, llvm_abi_alignment(coerced), "coerce_temp");
-	LLVMBuildStore(context->builder, value, temp);
+	unsigned max_align = MAX(llvm_abi_alignment(coerced), type_abi_alignment(original_type));
+	LLVMValueRef temp = gencontext_emit_alloca(context, coerced, max_align, "coerce_temp");
+	llvm_store_aligned(context, temp, value, max_align);
 	temp = LLVMBuildBitCast(context->builder, temp, llvm_type(type_get_ptr(original_type)), "");
-	return LLVMBuildLoad2(context->builder, llvm_type(original_type), temp, "coerced");
+	return gencontext_emit_load_aligned(context, llvm_type(original_type), temp, max_align, "coerced");
 }
 
 static inline LLVMValueRef gencontext_emit_sub_int(GenContext *context, Type *type, bool use_mod, LLVMValueRef left, LLVMValueRef right)
@@ -1792,32 +1794,28 @@ LLVMValueRef gencontext_emit_call_expr(GenContext *context, Expr *expr)
 
 	LLVMValueRef return_param = NULL;
 	LLVMValueRef *values = NULL;
-	ABIArgInfo *ret_abi_info = signature->ret_abi_info;
+	ABIArgInfo *ret_info = signature->ret_abi_info;
 	Type *return_type = signature->rtype->type->canonical;
 
-	switch (ret_abi_info->kind)
+	switch (ret_info->kind)
 	{
 		case ABI_ARG_INDIRECT:
-		case ABI_ARG_INDIRECT_REALIGNED:
 			// Create the return parameter
-			return_param = gencontext_emit_alloca_aligned(context, return_type, "returnparam");
+			return_param = gencontext_emit_alloca(context, llvm_type(return_type),
+			                                      ret_info->indirect.realignment, "sretparam");
 			// Add the pointer to the list of arguments.
 			vec_add(values, return_param);
-			if (ret_abi_info->kind == ABI_ARG_INDIRECT_REALIGNED)
+			if (ret_info->indirect.realignment)
 			{
-				LLVMSetAlignment(return_param, ret_abi_info->realignment);
+				LLVMSetAlignment(return_param, ret_info->indirect.realignment);
 			}
 			break;
-		case ABI_ARG_EXPAND_PADDED:
 		case ABI_ARG_EXPAND:
 			UNREACHABLE
-		case ABI_ARG_DIRECT_HVA:
-		case ABI_ARG_DIRECT_INT_EXTEND:
+		case ABI_ARG_DIRECT_PAIR:
 		case ABI_ARG_DIRECT:
 		case ABI_ARG_IGNORE:
 		case ABI_ARG_DIRECT_COERCE:
-		case ABI_ARG_DIRECT_PAIR:
-		case ABI_ARG_DIRECT_HIGH:
 			break;
 	}
 	unsigned param_index = 0;
@@ -1828,85 +1826,122 @@ LLVMValueRef gencontext_emit_call_expr(GenContext *context, Expr *expr)
 		Expr *arg_expr = expr->call_expr.arguments[i];
 		LLVMValueRef value = gencontext_emit_expr(context, arg_expr);
 		Decl *param = signature->params[i];
-		ABIArgInfo *abi_info = param->var.abi_info;
-		switch (abi_info->kind)
+		ABIArgInfo *info = param->var.abi_info;
+		switch (info->kind)
 		{
-			case ABI_ARG_DIRECT_PAIR:
-			case ABI_ARG_DIRECT_HIGH:
-				TODO
-			case ABI_ARG_DIRECT_HVA:
-				// This is a homogenous aggregate just pass in reg.
-				vec_add(values, value);
-				break;
 			case ABI_ARG_IGNORE:
 				// Skip.
 				break;
-			case ABI_ARG_INDIRECT_REALIGNED:
 			case ABI_ARG_INDIRECT:
 			{
 				// If we want we could optimize for structs by doing it by reference here.
-				LLVMValueRef indirect = gencontext_emit_alloca_aligned(context, param->type, "indirect.arg");
-				if (abi_info->kind == ABI_ARG_INDIRECT_REALIGNED)
-				{
-					LLVMSetAlignment(indirect, abi_info->realignment);
-				}
-				LLVMBuildStore(context->builder, value, indirect);
+				unsigned alignment = info->indirect.realignment ?: type_abi_alignment(param->type);
+				LLVMValueRef indirect = gencontext_emit_alloca(context, llvm_type(param->type), alignment, "indirectarg");
+				llvm_store_aligned(context, indirect, value, alignment);
 				vec_add(values, indirect);
 				break;
 			}
 			case ABI_ARG_DIRECT:
-			case ABI_ARG_DIRECT_INT_EXTEND:
 				vec_add(values, value);
 				break;
 			case ABI_ARG_DIRECT_COERCE:
-				value = gencontext_emit_convert_value_to_coerced(context, llvm_abi_type(abi_info->direct_coerce_type), value, param->type);
-				vec_add(values, value);
+			{
+				LLVMTypeRef type = gencontext_get_coerce_type(context, info);
+				if (!abi_info_should_flatten(info))
+				{
+					vec_add(values, gencontext_emit_convert_value_to_coerced(context, type, value, param->type));
+					break;
+				}
+				unsigned max_align = MAX(type_abi_alignment(param->type), llvm_abi_alignment(type));
+				LLVMValueRef temp = gencontext_emit_alloca(context, type, max_align, "tempcoerce");
+				LLVMValueRef cast = LLVMBuildBitCast(context->builder, temp, LLVMPointerType(type, 0), "");
+				llvm_store_aligned(context, cast, value, max_align);
+				LLVMTypeRef element = llvm_abi_type(info->direct_coerce.type);
+				for (unsigned idx = 0; idx < info->direct_coerce.elements; idx++)
+				{
+					LLVMValueRef element_ptr = LLVMBuildStructGEP2(context->builder, type, temp, idx, "");
+					vec_add(values, gencontext_emit_load_aligned(context, element, element_ptr, llvm_abi_alignment(element), ""));
+				}
 				break;
+			}
+			case ABI_ARG_DIRECT_PAIR:
+			{
+				// Here we do the following transform:
+				// struct -> { lo, hi } -> lo, hi
+				LLVMTypeRef lo = llvm_abi_type(info->direct_pair.lo);
+				LLVMTypeRef hi = llvm_abi_type(info->direct_pair.hi);
+				LLVMTypeRef struct_type = gencontext_get_coerce_type(context, info);
+				unsigned max_align = MAX(llvm_abi_alignment(struct_type), type_abi_alignment(param->type));
+				// Create the alloca holding the struct.
+				LLVMValueRef temp = gencontext_emit_alloca(context, struct_type, max_align, "temp");
+				// Bit cast to the original type type.
+				LLVMValueRef cast = LLVMBuildBitCast(context->builder, temp, llvm_ptr_type(param->type), "");
+				// Store the value.
+				llvm_store_aligned(context, cast, value, max_align);
+				// Get the lo value.
+				LLVMValueRef lo_ptr = LLVMBuildStructGEP2(context->builder, struct_type, temp, 0, "lo");
+				vec_add(values, gencontext_emit_load_aligned(context, lo, lo_ptr, llvm_abi_alignment(lo), "lo"));
+				// Get the hi value.
+				LLVMValueRef hi_ptr = LLVMBuildStructGEP2(context->builder, struct_type, temp, 1, "hi");
+				vec_add(values, gencontext_emit_load_aligned(context, hi, hi_ptr, llvm_abi_alignment(hi), "hi"));
+				break;
+			}
 			case ABI_ARG_EXPAND:
 			{
 				LLVMValueRef expand = gencontext_emit_alloca_aligned(context, param->type, "expand");
-				LLVMBuildStore(context->builder, value, expand);
+				llvm_store_aligned(context, expand, value, type_abi_alignment(param->type));
 				gencontext_expand_type_to_args(context, param->type, expand, &values);
+				// Expand the padding here.
+				if (info->expand.padding_type)
+				{
+					vec_add(values, LLVMGetUndef(llvm_type(info->expand.padding_type)));
+				}
 				break;
 			}
-			case ABI_ARG_EXPAND_PADDED:
-				TODO
-				break;
 		}
 	}
-
-	LLVMValueRef call = LLVMBuildCall2(context->builder, func_type, func, values, vec_size(values), "call");
-
-	switch (ret_abi_info->kind)
+	for (unsigned i = vec_size(signature->params); i < arguments; i++)
 	{
-		case ABI_ARG_EXPAND_PADDED:
+		Expr *arg_expr = expr->call_expr.arguments[i];
+		LLVMValueRef value = gencontext_emit_expr(context, arg_expr);
+		vec_add(values, value);
+	}
+
+	LLVMValueRef call = LLVMBuildCall2(context->builder, func_type, func, values, vec_size(values), "");
+
+	switch (ret_info->kind)
+	{
 		case ABI_ARG_EXPAND:
 			UNREACHABLE
 		case ABI_ARG_IGNORE:
 		case ABI_ARG_DIRECT:
-		case ABI_ARG_DIRECT_INT_EXTEND:
 			// Default behaviour is fine.
 			break;
 		case ABI_ARG_INDIRECT:
 			// TODO look at failable
-			call = gencontext_emit_load(context, return_type, return_param);
+			call = gencontext_emit_load_aligned(context, llvm_type(return_type), return_param, ret_info->indirect.realignment, "");
 			break;
-		case ABI_ARG_INDIRECT_REALIGNED:
+		case ABI_ARG_DIRECT_PAIR:
+		{
 			// TODO look at failable
-			call = gencontext_emit_load(context, return_type, return_param);
-			LLVMSetAlignment(call, ret_abi_info->realignment);
-			break;
-		case ABI_ARG_DIRECT_COERCE:
-			// TODO look at failable
+			LLVMTypeRef lo = llvm_abi_type(ret_info->direct_pair.lo);
+			LLVMTypeRef hi = llvm_abi_type(ret_info->direct_pair.hi);
+			LLVMTypeRef struct_type = gencontext_get_twostruct(context, lo, hi);
 			call = gencontext_emit_convert_value_from_coerced(context,
-			                                                  llvm_abi_type(ret_abi_info->direct_coerce_type),
+			                                                  struct_type,
 			                                                  call,
 			                                                  return_type);
 			break;
-		case ABI_ARG_DIRECT_HVA:
-		case ABI_ARG_DIRECT_PAIR:
-		case ABI_ARG_DIRECT_HIGH:
-			TODO
+		}
+
+		case ABI_ARG_DIRECT_COERCE:
+			// TODO look at failable
+			assert(!abi_info_should_flatten(ret_info));
+			call = gencontext_emit_convert_value_from_coerced(context,
+			                                                  gencontext_get_coerce_type(context, ret_info),
+			                                                  call,
+			                                                  return_type);
+			break;
 	}
 
 	if (signature->failable)

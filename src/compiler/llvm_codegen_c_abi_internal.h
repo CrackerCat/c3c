@@ -18,33 +18,44 @@ typedef enum
 
 typedef enum
 {
-	BY_REG,
-	BY_NORMAL
-} ByReg;
+	IN_REG_NONE = 0,
+	IN_REG = 1,
+} InReg;
 
+typedef enum
+{
+	BY_VAL,
+	BY_VAL_SKIP
+} ByVal;
 
 ABIArgInfo *abi_arg_new(ABIKind kind);
-ABIArgInfo *abi_arg_new_direct_pair(AbiType *low_type, AbiType *high_type, AbiType *low_extend);
-ABIArgInfo *abi_arg_new_direct_high(AbiType *high_type);
+ABIArgInfo *abi_arg_new_direct_pair(AbiType *low_type, AbiType *high_type);
 
+ABIArgInfo *abi_arg_new_direct_int_ext(Type *type_to_extend);
 ABIArgInfo *abi_arg_new_direct_coerce(AbiType *target_type);
-ABIArgInfo *abi_arg_new_expand_padded(Type *type);
+ABIArgInfo *abi_arg_new_expand_padded(Type *padding);
 ABIArgInfo *abi_arg_new_indirect_realigned(unsigned alignment);
+ABIArgInfo *abi_arg_new_indirect_by_val(void);
+ABIArgInfo *abi_arg_new_indirect_not_by_val(void);
 
 AbiType *abi_type_new_plain(Type *type);
 AbiType *abi_type_new_int_bits(unsigned bits);
+AbiType *abi_type_new_pair(AbiType *lo, AbiType *hi);
 bool abi_type_is_integer(AbiType *type);
 bool abi_type_is_float(AbiType *type);
-bool abi_type_abi_alignment(AbiType *type);
-bool abi_type_size(AbiType *type);
-
+size_t abi_type_abi_alignment(AbiType *type);
+size_t abi_type_size(AbiType *type);
 
 static inline ABIArgInfo *abi_arg_by_reg_attr(ABIArgInfo *info)
 {
 	info->attributes.by_reg = true;
 	return info;
 }
+
+ABIArgInfo *c_abi_classify_argument_type_default(Type *type);
+void c_abi_func_create_win64(GenContext *context, FunctionSignature *signature);
 void c_abi_func_create_x86(GenContext *context, FunctionSignature *signature);
 void c_abi_func_create_x64(GenContext *context, FunctionSignature *signature);
+void c_abi_func_create_aarch64(GenContext *context, FunctionSignature *signature);
 bool abi_arg_is_indirect(ABIArgInfo *info);
 size_t expanded_size(ABIArgInfo *type_info, Type *type);

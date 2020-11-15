@@ -5,71 +5,6 @@
 #include "llvm_codegen_c_abi_internal.h"
 
 
-static CABIKind c_abi_get_kind(CallConvention convention)
-{
-	switch (build_target.arch)
-	{
-		case ARCH_TYPE_X86:
-			switch (convention)
-			{
-				case CALL_CONVENTION_NORMAL:
-					return build_target.os == OS_TYPE_WIN32 ? WIN32_CDECL : UNIX_CDECL;
-				case CALL_CONVENTION_VECTOR:
-					return build_target.os == OS_TYPE_WIN32 ? WIN32_VEC : UNIX_CDECL;
-				case CALL_CONVENTION_STD:
-					return build_target.os == OS_TYPE_WIN32 ? WIN32_STD : UNIX_CDECL;
-				case CALL_CONVENTION_SYSCALL:
-					return build_target.os == OS_TYPE_WIN32 ? WIN32_SYS : UNIX_CDECL;
-				// Thiscall and pascal not supported.
-				case CALL_CONVENTION_REGCALL:
-					TODO
-					break;
-				case CALL_CONVENTION_FAST:
-					TODO
-					break;
-			}
-			UNREACHABLE
-		case ARCH_TYPE_X86_64:
-			switch (convention)
-			{
-				case CALL_CONVENTION_NORMAL:
-				case CALL_CONVENTION_STD:
-				case CALL_CONVENTION_SYSCALL:
-				case CALL_CONVENTION_VECTOR:
-					return build_target.os == OS_TYPE_WIN32 ? WIN64_CC : AMD64_CC;
-				case CALL_CONVENTION_REGCALL:
-					TODO
-					break;
-				case CALL_CONVENTION_FAST:
-					TODO
-					break;
-			}
-			UNREACHABLE
-		default:
-			TODO
-
-	}
-	TODO
-}
-
-typedef enum
-{
-	CABI_PARAM_SRETURN,
-	CABI_PARAM_MEMORY,
-} CABIParamKind;
-typedef struct
-{
-	int index;
-	CABIParamKind kind;
-} CABIParam;
-
-
-typedef struct
-{
-	CABIParam return_value;
-	CABIParam failure;
-} CallDescriptor;
-
 ABIArgInfo *abi_arg_new(ABIKind kind)
 {
 	ABIArgInfo *info = CALLOCS(ABIArgInfo);
@@ -103,7 +38,7 @@ bool abi_type_is_float(AbiType *type)
 	return type->kind != ABI_TYPE_INT_BITS && type_is_float(type->type);
 }
 
-bool abi_type_size(AbiType *type)
+size_t abi_type_size(AbiType *type)
 {
 	switch (type->kind)
 	{
@@ -115,9 +50,8 @@ bool abi_type_size(AbiType *type)
 	UNREACHABLE;
 }
 
-bool abi_type_abi_alignment(AbiType *type)
+size_t abi_type_abi_alignment(AbiType *type)
 {
-	printf(">>>> %d\n", next_highest_power_of_2(24));
 	switch (type->kind)
 	{
 		case ABI_TYPE_INT_BITS:
@@ -134,16 +68,11 @@ bool abi_arg_is_indirect(ABIArgInfo *info)
 	{
 		case ABI_ARG_IGNORE:
 		case ABI_ARG_DIRECT:
-		case ABI_ARG_DIRECT_HVA:
 		case ABI_ARG_DIRECT_COERCE:
-		case ABI_ARG_DIRECT_INT_EXTEND:
 		case ABI_ARG_EXPAND:
-		case ABI_ARG_EXPAND_PADDED:
 		case ABI_ARG_DIRECT_PAIR:
-		case ABI_ARG_DIRECT_HIGH:
 			return false;
 		case ABI_ARG_INDIRECT:
-		case ABI_ARG_INDIRECT_REALIGNED:
 			return true;
 	}
 }
@@ -151,8 +80,23 @@ bool abi_arg_is_indirect(ABIArgInfo *info)
 ABIArgInfo *abi_arg_new_indirect_realigned(unsigned alignment)
 {
 	assert(alignment > 0);
-	ABIArgInfo *info = abi_arg_new(ABI_ARG_INDIRECT_REALIGNED);
-	info->realignment = alignment;
+	ABIArgInfo *info = abi_arg_new(ABI_ARG_INDIRECT);
+	info->indirect.realignment = alignment;
+	info->indirect.by_val = true;
+	return info;
+}
+
+ABIArgInfo *abi_arg_new_indirect_by_val(void)
+{
+	ABIArgInfo *info = abi_arg_new(ABI_ARG_INDIRECT);
+	info->indirect.by_val = true;
+	return info;
+}
+
+ABIArgInfo *abi_arg_new_indirect_not_by_val(void)
+{
+	ABIArgInfo *info = abi_arg_new(ABI_ARG_INDIRECT);
+	info->indirect.by_val = true;
 	return info;
 }
 
@@ -184,32 +128,57 @@ size_t expanded_size(ABIArgInfo *type_info, Type *type)
 				if (type_size(type) > largest)
 				{
 					largest = type_size(type);
-					type = type->canonical;
+					largest_type = type->canonical;
 				}
 			}
 			if (!largest) return 0;
-			return expanded_size(type_info, type);
+			return expanded_size(type_info, largest_type);
 		}
-		// Type complex: return 2;
-		default:
+		case TYPE_COMPLEX:
+		case TYPE_SUBARRAY:
+		case TYPE_STRING:
+			// Complex is { real, real }, Sub array { pointer, len } = String?
+			return 2;
+		case TYPE_ERR_UNION:
+		case TYPE_VOID:
+		case TYPE_BOOL:
+		case ALL_FLOATS:
+		case ALL_INTS:
+		case TYPE_TYPEID:
+		case TYPE_POINTER:
+		case TYPE_ENUM:
+		case TYPE_ERRTYPE:
+		case TYPE_VARARRAY:
+		case TYPE_VECTOR:
 			return 1;
+		case TYPE_POISONED:
+		case TYPE_FUNC:
+		case TYPE_TYPEINFO:
+		case TYPE_MEMBER:
+			UNREACHABLE
 	}
 }
 
 
-ABIArgInfo *abi_arg_new_direct_high(AbiType *high_type)
+ABIArgInfo *abi_arg_new_direct_int_ext(Type *int_to_extend)
 {
-	ABIArgInfo *arg_info = abi_arg_new(ABI_ARG_DIRECT_HIGH);
-	arg_info->partial_type = high_type;
+	ABIArgInfo *arg_info = abi_arg_new(ABI_ARG_DIRECT);
+	if (type_is_signed(int_to_extend))
+	{
+		arg_info->attributes.signext = true;
+	}
+	else
+	{
+		arg_info->attributes.zeroext = true;
+	}
 	return arg_info;
 }
 
-ABIArgInfo *abi_arg_new_direct_pair(AbiType *low_type, AbiType *high_type, AbiType *low_extend)
+ABIArgInfo *abi_arg_new_direct_pair(AbiType *low_type, AbiType *high_type)
 {
 	ABIArgInfo *arg_info = abi_arg_new(ABI_ARG_DIRECT_PAIR);
-	arg_info->direct_pair.low_extend_type = low_extend;
-	arg_info->direct_pair.high_type = high_type;
-	arg_info->direct_pair.low_type = low_type;
+	arg_info->direct_pair.hi = high_type;
+	arg_info->direct_pair.lo = low_type;
 	return arg_info;
 }
 
@@ -217,17 +186,17 @@ ABIArgInfo *abi_arg_new_direct_coerce(AbiType *target_type)
 {
 	assert(target_type);
 	ABIArgInfo *info = abi_arg_new(ABI_ARG_DIRECT_COERCE);
-	info->direct_coerce_type = target_type;
+	info->direct_coerce.type = target_type;
+	info->direct_coerce.elements = 0;
 	return info;
 }
 
-ABIArgInfo *abi_arg_new_expand_padded(Type *type)
+ABIArgInfo *abi_arg_new_expand_padded(Type *padding)
 {
-	ABIArgInfo *info = abi_arg_new(ABI_ARG_EXPAND_PADDED);
-	info->padding_type = type;
+	ABIArgInfo *info = abi_arg_new(ABI_ARG_EXPAND);
+	info->expand.padding_type = padding;
 	return info;
 }
-
 
 ABIArgInfo *classify_return_type_default(Type *type)
 {
@@ -245,37 +214,21 @@ ABIArgInfo *classify_return_type_default(Type *type)
 	// Otherwise do we have a type that needs promotion?
 	if (type_is_promotable_integer(type_lowering(type)))
 	{
-		return abi_arg_new(ABI_ARG_DIRECT_INT_EXTEND);
+		ABIArgInfo *arg_info = abi_arg_new(ABI_ARG_DIRECT);
+		if (type_is_signed(type))
+		{
+			arg_info->attributes.signext = true;
+		}
+		else
+		{
+			arg_info->attributes.zeroext = true;
+		}
+		return arg_info;
 	}
 
 	// No, then do a direct pass.
 	return abi_arg_new(ABI_ARG_DIRECT);
 }
-
-static LLVMValueRef llvm_enter_struct_pointer_for_coerced_access(GenContext *context, LLVMValueRef src_ptr, LLVMTypeRef *source_type, size_t dest_size)
-{
-	// We do not enter a zero element struct.
-	if (!LLVMCountStructElementTypes(*source_type)) return src_ptr;
-
-	LLVMTypeRef first_element_type = LLVMStructGetTypeAtIndex(*source_type, 0);
-	// Check if the first element
-	size_t first_element_size = LLVMStoreSizeOfType(target_data_layout(), first_element_type);
-	if (first_element_size < dest_size && first_element_size < LLVMStoreSizeOfType(target_data_layout(), *source_type))
-	{
-		// The first element is too small, so return the current pointer:
-		return src_ptr;
-	}
-	// GEP into the first element.
-	src_ptr = LLVMBuildStructGEP2(context->builder, first_element_type, src_ptr, 0, "dive");
-	*source_type = first_element_type;
-	// Recurse if it is a struct.
-	if (LLVMGetTypeKind(first_element_type) == LLVMStructTypeKind)
-	{
-		return llvm_enter_struct_pointer_for_coerced_access(context, src_ptr, source_type, dest_size);
-	}
-	return src_ptr;
-}
-
 
 void c_abi_func_create(GenContext *context, FunctionSignature *signature)
 {
@@ -285,9 +238,40 @@ void c_abi_func_create(GenContext *context, FunctionSignature *signature)
 			c_abi_func_create_x64(context, signature);
 			break;
 		case ABI_X86:
-		default:
 			c_abi_func_create_x86(context, signature);
 			break;
+		case ABI_WIN64:
+			c_abi_func_create_win64(context, signature);
+			break;
+		case ABI_AARCH64:
+			c_abi_func_create_aarch64(context, signature);
+			break;
+		default:
+			FATAL_ERROR("Unsupported ABI");
 	}
 }
 
+ABIArgInfo *c_abi_classify_argument_type_default(Type *type)
+{
+	type = type_lowering(type);
+
+	// Struct-likes are returned by sret
+	if (type_is_abi_aggregate(type))
+	{
+		return abi_arg_new(ABI_ARG_INDIRECT);
+	}
+
+	if (type_is_int128(type) && !build_target.int_128)
+	{
+		return abi_arg_new_indirect_by_val();
+	}
+
+	// Otherwise do we have a type that needs promotion?
+	if (type_is_promotable_integer(type))
+	{
+		return abi_arg_new_direct_int_ext(type);
+	}
+
+	// No, then do a direct pass.
+	return abi_arg_new(ABI_ARG_DIRECT);
+}

@@ -46,6 +46,11 @@ static TypeInfo poison_type_info = { .kind = TYPE_INFO_POISON };
 Type *poisoned_type = &poison_type;
 TypeInfo *poisoned_type_info = &poison_type_info;
 
+unsigned decl_abi_alignment(Decl *decl)
+{
+	return decl->alignment ?: type_abi_alignment(decl->type);
+}
+
 void decl_set_external_name(Decl *decl)
 {
 	if (decl->visibility == VISIBLE_EXTERN)

@@ -157,6 +157,7 @@ static void param_expand(GenContext *context, LLVMTypeRef** params_ref, Type *ty
 			param_expand(context, params_ref, type_usize->canonical);
 			return;
 		case TYPE_ERRTYPE:
+			// TODO
 			param_expand(context, params_ref, type_usize->canonical);
 			return;
 		case TYPE_UNION:
@@ -183,6 +184,52 @@ static void param_expand(GenContext *context, LLVMTypeRef** params_ref, Type *ty
 	}
 
 }
+
+static inline void add_func_type_param(GenContext *context, Type *param_type, ABIArgInfo *arg_info, LLVMTypeRef **params)
+{
+	arg_info->param_index_start = vec_size(*params);
+	switch (arg_info->kind)
+	{
+		case ABI_ARG_IGNORE:
+			break;
+		case ABI_ARG_INDIRECT:
+			vec_add(*params, llvm_ptr_type(param_type));
+			break;
+		case ABI_ARG_DIRECT:
+			vec_add(*params, llvm_type(param_type));
+			break;
+		case ABI_ARG_EXPAND:
+			// Expanding a structs
+			param_expand(context, params, param_type->canonical);
+			// If we have padding, add it here.
+			if (arg_info->expand.padding_type)
+			{
+				vec_add(*params, llvm_type(arg_info->expand.padding_type));
+			}
+			break;
+		case ABI_ARG_DIRECT_COERCE:
+		{
+			LLVMTypeRef coerce_type = llvm_abi_type(arg_info->direct_coerce.type);
+			if (!abi_info_should_flatten(arg_info))
+			{
+				vec_add(*params, coerce_type);
+				break;
+			}
+			for (unsigned idx = 0; idx < arg_info->direct_coerce.elements; idx++)
+			{
+				vec_add(*params, coerce_type);
+			}
+			break;
+		}
+		case ABI_ARG_DIRECT_PAIR:
+			// Pairs are passed by param.
+			vec_add(*params, llvm_abi_type(arg_info->direct_pair.lo));
+			vec_add(*params, llvm_abi_type(arg_info->direct_pair.hi));
+			break;
+	}
+	arg_info->param_index_end = vec_size(*params);
+}
+
 LLVMTypeRef llvm_func_type(GenContext *context, Type *type)
 {
 	LLVMTypeRef *params = NULL;
@@ -191,89 +238,49 @@ LLVMTypeRef llvm_func_type(GenContext *context, Type *type)
 	c_abi_func_create(context, signature);
 
 	LLVMTypeRef return_type = NULL;
-	ABIArgInfo *reg_arg_info = signature->ret_abi_info;
-	switch (reg_arg_info->kind)
+
+	Type *real_return_type = signature->failable ? type_error : signature->rtype->type->canonical;
+	ABIArgInfo *ret_arg_info = signature->failable ? signature->failable_abi_info : signature->ret_abi_info;
+
+	switch (ret_arg_info->kind)
 	{
-		case ABI_ARG_DIRECT_PAIR:
-		case ABI_ARG_DIRECT_HIGH:
-			TODO
 		case ABI_ARG_EXPAND:
-		case ABI_ARG_EXPAND_PADDED:
 			UNREACHABLE;
-		case ABI_ARG_DIRECT_INT_EXTEND:
 		case ABI_ARG_DIRECT:
-			return_type = llvm_type(signature->rtype->type);
+			return_type = llvm_type(real_return_type);
 			break;
 		case ABI_ARG_INDIRECT:
-		case ABI_ARG_INDIRECT_REALIGNED:
-			vec_add(params, llvm_type(type_get_ptr(signature->rtype->type)));
+			vec_add(params, llvm_ptr_type(real_return_type));
 			FALLTHROUGH;
 		case ABI_ARG_IGNORE:
 			return_type = llvm_type(type_void);
 			break;
-		case ABI_ARG_DIRECT_HVA:
-			TODO
+		case ABI_ARG_DIRECT_PAIR:
+		{
+			LLVMTypeRef lo = llvm_abi_type(ret_arg_info->direct_pair.lo);
+			LLVMTypeRef hi = llvm_abi_type(ret_arg_info->direct_pair.hi);
+			return_type = gencontext_get_twostruct(context, lo, hi);
 			break;
+		}
 		case ABI_ARG_DIRECT_COERCE:
-			return_type = llvm_abi_type(reg_arg_info->direct_coerce_type);
+			assert(!abi_info_should_flatten(ret_arg_info));
+			return_type = gencontext_get_coerce_type(context, ret_arg_info);
 			break;
+	}
+
+	// If it's failable and it's not void (meaning ret_abi_info will be NULL)
+	if (signature->failable && signature->ret_abi_info)
+	{
+		add_func_type_param(context, type_get_ptr(signature->rtype->type), signature->ret_abi_info, &params);
 	}
 
 	// Add in all of the required arguments.
 	VECEACH(signature->params, i)
 	{
-		Decl *param = signature->params[i];
-		ABIArgInfo *arg_info = param->var.abi_info;
-		arg_info->param_index_start = vec_size(params);
-		switch (arg_info->kind)
-		{
-			case ABI_ARG_IGNORE:
-				break;
-			case ABI_ARG_INDIRECT:
-				vec_add(params, llvm_type(type_get_ptr(param->type)));
-				break;
-			case ABI_ARG_DIRECT_INT_EXTEND:
-			case ABI_ARG_DIRECT:
-				vec_add(params, llvm_type(param->type));
-				break;
-			case ABI_ARG_EXPAND:
-				// Expanding a structs
-				param_expand(context, &params, param->type->canonical);
-				break;
-			case ABI_ARG_DIRECT_PAIR:
-				vec_add(params, llvm_abi_type(arg_info->direct_pair.low_type));
-				vec_add(params, llvm_abi_type(arg_info->direct_pair.high_type));
-				break;
-			case ABI_ARG_DIRECT_COERCE:
-				vec_add(params, llvm_abi_type(arg_info->direct_coerce_type));
-				break;
-			case ABI_ARG_INDIRECT_REALIGNED:
-				vec_add(params, llvm_type(type_get_ptr(param->type)));
-				break;
-			case ABI_ARG_DIRECT_HVA:
-			case ABI_ARG_EXPAND_PADDED:
-			case ABI_ARG_DIRECT_HIGH:
-				TODO
-		}
+		add_func_type_param(context, signature->params[i]->type, signature->params[i]->var.abi_info, &params);
 	}
 
-	unsigned parameters = vec_size(params);
-	//if (signature->return_param) parameters++;
-
-	LLVMTypeRef ret_type;
-	/*
-	if (signature->failable)
-	{
-		TODO
-		ret_type = llvm_get_type(context, type_error);
-	}
-	else
-	{
-		ret_type = signature->return_param
-				? llvm_get_type(context, type_void)
-				: llvm_get_type(context, type->func.signature->rtype->type);
-	}*/
-	return LLVMFunctionType(return_type, params, parameters, signature->variadic);
+	return LLVMFunctionType(return_type, params, vec_size(params), signature->variadic);
 }
 
 
@@ -297,7 +304,10 @@ LLVMTypeRef llvm_get_type(GenContext *context, Type *any_type)
 		case TYPE_ENUM:
 			return any_type->backend_type = llvm_get_type(context, any_type->decl->enums.type_info->type->canonical);
 		case TYPE_ERR_UNION:
-			return any_type->backend_type = LLVMIntTypeInContext(context->context, any_type->builtin.bitsize);
+		{
+			LLVMTypeRef elements[2] = { llvm_get_type(context, type_usize->canonical), llvm_get_type(context, type_usize->canonical) };
+			return any_type->backend_type = LLVMStructTypeInContext(context->context, elements, 2, false);
+		}
 		case TYPE_STRUCT:
 		case TYPE_UNION:
 		case TYPE_ERRTYPE:
@@ -345,11 +355,43 @@ LLVMTypeRef llvm_get_type(GenContext *context, Type *any_type)
 			return any_type->backend_type = LLVMVectorType(llvm_type(any_type->vector.base), any_type->vector.len);
 		case TYPE_COMPLEX:
 		{
-			LLVMTypeRef types[2] = { llvm_type(any_type->complex), llvm_type(any_type->complex) };
-			return any_type->backend_type = LLVMStructType(types, 2, false);
+			return any_type->backend_type = gencontext_get_twostruct(context, llvm_type(any_type->complex), llvm_type(any_type->complex));
 		}
 	}
 	UNREACHABLE;
+}
+
+LLVMTypeRef gencontext_get_twostruct_abi_type(GenContext *context, AbiType *lo, AbiType *hi)
+{
+	return gencontext_get_twostruct(context, llvm_abi_type(lo), llvm_abi_type(hi));
+}
+
+LLVMTypeRef gencontext_get_coerce_type(GenContext *context, ABIArgInfo *arg_info)
+{
+	if (arg_info->kind == ABI_ARG_DIRECT_COERCE)
+	{
+		LLVMTypeRef coerce_type = gencontext_get_llvm_abi_type(context, arg_info->direct_coerce.type);
+		if (arg_info->direct_coerce.elements < 2U) return coerce_type;
+		LLVMTypeRef *refs = MALLOC(sizeof(LLVMValueRef) * arg_info->direct_coerce.elements);
+		for (unsigned i = 0; i < arg_info->direct_coerce.elements; i++)
+		{
+			refs[i] = coerce_type;
+		}
+		return LLVMStructTypeInContext(context->context, refs, arg_info->direct_coerce.elements, false);
+	}
+	if (arg_info->kind == ABI_ARG_DIRECT_PAIR)
+	{
+		LLVMTypeRef lo = llvm_abi_type(arg_info->direct_pair.lo);
+		LLVMTypeRef hi = llvm_abi_type(arg_info->direct_pair.hi);
+		return gencontext_get_twostruct(context, lo, hi);
+	}
+	UNREACHABLE
+}
+
+LLVMTypeRef gencontext_get_twostruct(GenContext *context, LLVMTypeRef lo, LLVMTypeRef hi)
+{
+	LLVMTypeRef types[2] = { lo, hi };
+	return LLVMStructTypeInContext(context->context, types, 2, false);
 }
 
 LLVMTypeRef gencontext_get_llvm_type(GenContext *context, Type *type)

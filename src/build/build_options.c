@@ -215,17 +215,17 @@ static void parse_option()
 			if (match_shortopt("freg-struct-return"))
 			{
 				build_options.feature.reg_struct_return = true;
-				break;
+				return;
 			}
 			if (match_shortopt("fpcc-struct-return"))
 			{
 				build_options.feature.stack_struct_return = true;
-				break;
+				return;
 			}
 			if (match_shortopt("fno-memcpy-pass"))
 			{
 				build_options.feature.no_memcpy_pass = true;
-				break;
+				return;
 			}
 			FAIL_WITH_ERR("Unknown argument -%s.", &current_arg[1]);
 		case 'm':
@@ -233,13 +233,13 @@ static void parse_option()
 			{
 				build_options.feature.soft_float = true;
 				build_options.feature.no_soft_float = false;
-				break;
+				return;
 			}
 			if (match_shortopt("mno-soft-float"))
 			{
 				build_options.feature.soft_float = true;
 				build_options.feature.no_soft_float = false;
-				break;
+				return;
 			}
 			FAIL_WITH_ERR("Cannot process the unknown command \"%s\".", current_arg);
 		case 'O':
