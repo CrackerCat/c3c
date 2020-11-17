@@ -7,6 +7,7 @@
 #include "bigint.h"
 
 static LLVMValueRef gencontext_emit_int_comparison(GenContext *context, Type *lhs_type, Type *rhs_type, LLVMValueRef lhs_value, LLVMValueRef rhs_value, BinaryOp binary_op);
+static void gencontext_emit_unary_expr(GenContext *context, BEValue *value, Expr *expr);
 
 static inline LLVMValueRef gencontext_emit_add_int(GenContext *context, Type *type, bool use_mod, LLVMValueRef left, LLVMValueRef right)
 {
@@ -219,11 +220,10 @@ static inline LLVMValueRef gencontext_emit_access_addr(GenContext *context, Expr
 	return gencontext_emit_member_addr(context, value, parent->type->canonical->decl, member);
 }
 
-LLVMValueRef gencontext_emit_scoped_expr(GenContext *context, Expr *expr)
+void gencontext_emit_scoped_expr(GenContext *context, BEValue *value, Expr *expr)
 {
-	LLVMValueRef value = gencontext_emit_expr(context, expr->expr_scope.expr);
+	bevalue_from_value(value, gencontext_emit_expr(context, expr->expr_scope.expr), expr->type);
 	gencontext_emit_defer(context, expr->expr_scope.defers.start, expr->expr_scope.defers.end);
-	return value;
 }
 
 LLVMValueRef gencontext_emit_scoped_expr_address(GenContext *context, Expr *expr)
@@ -268,7 +268,12 @@ LLVMValueRef gencontext_emit_address(GenContext *context, Expr *expr)
 			return decl_ref(expr->identifier_expr.decl);
 		case EXPR_UNARY:
 			assert(expr->unary_expr.operator == UNARYOP_DEREF);
-			return gencontext_emit_expr(context, expr->unary_expr.expr);
+			{
+				BEValue value;
+				gencontext_emit_unary_expr(context, &value, expr);
+				assert(value.kind == BE_ADDRESS);
+				return value.value;
+			}
 		case EXPR_COMPOUND_LITERAL:
 			return gencontext_emit_initializer_list_expr_addr(context, expr->expr_compound_literal.initializer, NULL);
 		case EXPR_ACCESS:
@@ -285,7 +290,7 @@ LLVMValueRef gencontext_emit_address(GenContext *context, Expr *expr)
 			LLVMValueRef temp = gencontext_emit_alloca_aligned(context, return_type, "callresult");
 			assert(return_type->canonical->type_kind != TYPE_BOOL);
 			LLVMValueRef result = gencontext_emit_expr(context, expr);
-			llvm_store_expand_self_aligned(context, temp, result, return_type);
+			llvm_store_self_aligned(context, temp, result, return_type);
 			return temp;
 		}
 		case EXPR_CONST:
@@ -612,7 +617,7 @@ static inline LLVMValueRef gencontext_emit_initializer_list_expr_addr(GenContext
 			Expr *element = elements[i];
 			LLVMValueRef init_value = gencontext_emit_expr(context, element);
 			LLVMValueRef subref = LLVMBuildStructGEP2(context->builder, type, ref, i + (int)is_error, "");
-			llvm_store_expand_self_aligned(context, subref, init_value, element->type);
+			llvm_store_self_aligned(context, subref, init_value, element->type);
 		}
 		return ref;
 	}
@@ -690,57 +695,60 @@ static inline LLVMValueRef gencontext_emit_inc_dec_change(GenContext *context, b
 		: gencontext_emit_sub_int(context, type, use_mod, current_value, diff_value);
 }
 
-static inline LLVMValueRef gencontext_emit_pre_inc_dec(GenContext *context, Expr *expr, int diff, bool use_mod)
+static inline void gencontext_emit_pre_inc_dec(GenContext *context, BEValue *value, Expr *expr, int diff, bool use_mod)
 {
 	LLVMValueRef addr = gencontext_emit_address(context, expr);
-	LLVMValueRef value = gencontext_emit_load(context, expr->type, addr);
-	LLVMValueRef result = gencontext_emit_inc_dec_change(context, use_mod, value, expr, diff);
+	LLVMValueRef current_value = gencontext_emit_load(context, expr->type, addr);
+	LLVMValueRef result = gencontext_emit_inc_dec_change(context, use_mod, current_value, expr, diff);
 	LLVMBuildStore(context->builder, result, addr);
-	return result;
+	bevalue_from_value(value, current_value, expr->type);
 }
 
-static inline LLVMValueRef gencontext_emit_post_inc_dec(GenContext *context, Expr *expr, int diff, bool use_mod)
+static inline void gencontext_emit_post_inc_dec(GenContext *context, BEValue *value, Expr *expr, int diff, bool use_mod)
 {
 	LLVMValueRef addr = gencontext_emit_address(context, expr);
-	LLVMValueRef value = gencontext_emit_load(context, expr->type, addr);
-	LLVMValueRef result = gencontext_emit_inc_dec_change(context, use_mod, value, expr, diff);
+	LLVMValueRef current_value = gencontext_emit_load(context, expr->type, addr);
+	LLVMValueRef result = gencontext_emit_inc_dec_change(context, use_mod, current_value, expr, diff);
 	LLVMBuildStore(context->builder, result, addr);
-	return value;
+	bevalue_from_value(value, current_value, expr->type);
 }
 
-LLVMValueRef gencontext_emit_unary_expr(GenContext *context, Expr *expr)
+static void gencontext_emit_unary_expr(GenContext *context, BEValue *value, Expr *expr)
 {
 	Type *type = type_reduced_from_expr(expr->unary_expr.expr);
+	LLVMValueRef llvm_value;
 	switch (expr->unary_expr.operator)
 	{
 		case UNARYOP_ERROR:
 			FATAL_ERROR("Illegal unary op %s", expr->unary_expr.operator);
 		case UNARYOP_TADDR:
-		{
-			LLVMValueRef val = gencontext_emit_expr(context, expr->unary_expr.expr);
-			LLVMValueRef temp = gencontext_emit_alloca_aligned(context, expr->unary_expr.expr->type, "taddr");
-			LLVMBuildStore(context->builder, val, temp);
-			return temp;
-		}
+			llvm_value = gencontext_emit_alloca_aligned(context, expr->unary_expr.expr->type, "taddr");
+			llvm_store_self_aligned(context, llvm_value, gencontext_emit_expr(context, expr->unary_expr.expr), type);
+			goto RETURN_VALUE;
 		case UNARYOP_NOT:
 			if (type_is_float(type))
 			{
 				LLVMValueRef val = gencontext_emit_expr(context, expr->unary_expr.expr);
-				return LLVMBuildFCmp(context->builder, LLVMRealUNE, val, LLVMConstNull(llvm_type(type)), "");
+				llvm_value = LLVMBuildFCmp(context->builder, LLVMRealUNE, val, LLVMConstNull(llvm_type(type)), "");
+				goto RETURN_VALUE;
 			}
 			else
 			{
 				LLVMValueRef val = gencontext_emit_expr(context, expr->unary_expr.expr);
-				return LLVMBuildICmp(context->builder, LLVMIntEQ, val, LLVMConstNull(llvm_type(type)), "");
+				llvm_value = LLVMBuildICmp(context->builder, LLVMIntEQ, val, LLVMConstNull(llvm_type(type)), "");
+				goto RETURN_VALUE;
 			}
 		case UNARYOP_BITNEG:
-			return LLVMBuildNot(context->builder, gencontext_emit_expr(context, expr->unary_expr.expr), "bnot");
+			llvm_value = LLVMBuildNot(context->builder, gencontext_emit_expr(context, expr->unary_expr.expr), "bnot");
+			goto RETURN_VALUE;
 		case UNARYOP_NEGMOD:
-			return LLVMBuildNeg(context->builder, gencontext_emit_expr(context, expr->unary_expr.expr), "negmod");
+			llvm_value = LLVMBuildNeg(context->builder, gencontext_emit_expr(context, expr->unary_expr.expr), "negmod");
+			goto RETURN_VALUE;
 		case UNARYOP_NEG:
 			if (type_is_float(type))
 			{
-				return LLVMBuildFNeg(context->builder, gencontext_emit_expr(context, expr->unary_expr.expr), "fneg");
+				llvm_value = LLVMBuildFNeg(context->builder, gencontext_emit_expr(context, expr->unary_expr.expr), "fneg");
+				goto RETURN_VALUE;
 			}
 			assert(!type_is_unsigned(type));
 			{
@@ -753,50 +761,55 @@ LLVMValueRef gencontext_emit_unary_expr(GenContext *context, Expr *expr)
 					LLVMValueRef call_res = gencontext_emit_call_intrinsic(context,
 					                                                       ssub_overflow_intrinsic_id,
 					                                                       &type_to_use, 1, args, 2);
-					LLVMValueRef result = LLVMBuildExtractValue(context->builder, call_res, 0, "");
+					llvm_value = LLVMBuildExtractValue(context->builder, call_res, 0, "");
 					LLVMValueRef ok = LLVMBuildExtractValue(context->builder, call_res, 1, "");
 					gencontext_emit_panic_on_true(context, ok, "Signed negation overflow");
-					return result;
+					goto RETURN_VALUE;
 				}
-				return LLVMBuildNSWSub(context->builder, zero, to_negate, "neg");
+				llvm_value = LLVMBuildNSWSub(context->builder, zero, to_negate, "neg");
+				goto RETURN_VALUE;
 			}
 		case UNARYOP_ADDR:
-			return gencontext_emit_address(context, expr->unary_expr.expr);
+			// Pick up the alignment.
+			llvm_value = gencontext_emit_address(context, expr->unary_expr.expr);
+			goto RETURN_VALUE;
 		case UNARYOP_DEREF:
-			// TODO check on deref null
-			return gencontext_emit_load(context, expr->type, gencontext_emit_expr(context, expr->unary_expr.expr));
+			bevalue_from_address(value, gencontext_emit_expr(context, expr->unary_expr.expr), type);
+			return;
 		case UNARYOP_INC:
-			return gencontext_emit_pre_inc_dec(context, expr->unary_expr.expr, 1, false);
+			gencontext_emit_pre_inc_dec(context, value, expr->unary_expr.expr, 1, false);
+			return;
 		case UNARYOP_DEC:
-			return gencontext_emit_pre_inc_dec(context, expr->unary_expr.expr, -1, false);
+			gencontext_emit_pre_inc_dec(context, value, expr->unary_expr.expr, -1, false);
+			return;
 	}
 	UNREACHABLE
+RETURN_VALUE:
+	bevalue_from_value(value, llvm_value, type);
 }
 
-static LLVMValueRef gencontext_emit_len_value(GenContext *context, Expr *inner, LLVMValueRef inner_value)
+static void gencontext_emit_len(GenContext *context, BEValue *be_value, Expr *expr)
 {
+	Expr *inner = expr->len_expr.inner;
+	LLVMValueRef ptr = gencontext_emit_address(context, inner);
 	Type *type = inner->type;
 	switch (type->canonical->type_kind)
 	{
 		case TYPE_SUBARRAY:
 		{
 			LLVMTypeRef subarray_type = llvm_type(type);
-			LLVMValueRef len_addr = LLVMBuildStructGEP2(context->builder, subarray_type, inner_value, 1, "len");
-			return gencontext_emit_load(context, type_usize, len_addr);
+			LLVMValueRef len_addr = LLVMBuildStructGEP2(context->builder, subarray_type, ptr, 1, "len");
+			bevalue_from_address(be_value, len_addr, type_usize);
 		}
 		case TYPE_ARRAY:
-			return gencontext_emit_const_int(context, type_usize, type->array.len);
+			bevalue_from_value(be_value, gencontext_emit_const_int(context, type_usize, type->array.len), type_usize);
+			break;
+		case TYPE_VARARRAY:
+		case TYPE_STRING:
+			TODO
 		default:
 			UNREACHABLE
 	}
-
-}
-
-static LLVMValueRef gencontext_emit_len(GenContext *context, Expr *expr)
-{
-	Expr *inner = expr->len_expr.inner;
-	LLVMValueRef value = gencontext_emit_address(context, inner);
-	return gencontext_emit_len_value(context, inner, value);
 }
 
 static void gencontext_emit_trap_negative(GenContext *context, Expr *expr, LLVMValueRef value, const char *error)
@@ -932,7 +945,7 @@ gencontext_emit_slice_values(GenContext *context, Expr *slice, Type **parent_typ
 	*parent_type_ref = parent_type;
 }
 
-static LLVMValueRef gencontext_emit_slice(GenContext *context, Expr *expr)
+static void gencontext_emit_slice(GenContext *context, BEValue *be_value, Expr *expr)
 {
 	Type *parent_type;
 	Type *end_type;
@@ -973,11 +986,10 @@ static LLVMValueRef gencontext_emit_slice(GenContext *context, Expr *expr)
 	// Create a new subarray type
 	LLVMValueRef result = LLVMGetUndef(llvm_type(expr->type));
 	result = LLVMBuildInsertValue(context->builder, result, start_pointer, 0, "");
-	return LLVMBuildInsertValue(context->builder, result, size, 1, "");
-
+	bevalue_from_value(be_value, LLVMBuildInsertValue(context->builder, result, size, 1, ""), expr->type);
 }
 
-static LLVMValueRef gencontext_emit_slice_assign(GenContext *context, Expr *expr)
+static void gencontext_emit_slice_assign(GenContext *context, BEValue *be_value, Expr *expr)
 {
 	// We will be replacing the slice assign with code that roughly looks like this:
 	// size_t end = slice_end;
@@ -1040,7 +1052,7 @@ static LLVMValueRef gencontext_emit_slice_assign(GenContext *context, Expr *expr
 	// And emit the exit block.
 	gencontext_emit_block(context, exit_block);
 
-	return value;
+	bevalue_from_value(be_value, value, expr->type);
 }
 
 static LLVMValueRef gencontext_emit_logical_and_or(GenContext *context, Expr *expr, BinaryOp op)
@@ -1369,19 +1381,24 @@ static LLVMValueRef gencontext_emit_binary(GenContext *context, Expr *expr, LLVM
 }
 
 
-LLVMValueRef gencontext_emit_post_unary_expr(GenContext *context, Expr *expr)
+static void gencontext_emit_post_unary_expr(GenContext *context, BEValue *be_value, Expr *expr)
 {
-	return gencontext_emit_post_inc_dec(context, expr->post_expr.expr, expr->post_expr.operator == POSTUNARYOP_INC ? 1 : -1, false);
+	gencontext_emit_post_inc_dec(context, be_value, expr->post_expr.expr, expr->post_expr.operator == POSTUNARYOP_INC ? 1 : -1, false);
 }
 
-LLVMValueRef gencontext_emit_typeid(GenContext *context, Expr *expr)
+static void gencontext_emit_typeid(GenContext *context, BEValue *be_value, Expr *expr)
 {
+	LLVMValueRef value;
 	if (type_is_builtin(expr->typeid_expr->type->type_kind))
 	{
-		return gencontext_emit_const_int(context, type_usize, expr->typeid_expr->type->type_kind);
+		value = gencontext_emit_const_int(context, type_usize, expr->typeid_expr->type->type_kind);
 	}
-	assert(expr->typeid_expr->type->backend_typeid);
-	return expr->typeid_expr->type->backend_typeid;
+	else
+	{
+		assert(expr->typeid_expr->type->backend_typeid);
+		value = expr->typeid_expr->type->backend_typeid;
+	}
+	bevalue_from_value(be_value, value, expr->type);
 }
 
 LLVMValueRef gencontext_emit_trycatch_expr(GenContext *context, Expr *expr)
@@ -1556,7 +1573,7 @@ static LLVMValueRef gencontext_emit_binary_expr(GenContext *context, Expr *expr)
 		assert(base_op != BINARYOP_ERROR);
 		LLVMValueRef addr = gencontext_emit_address(context, expr->binary_expr.left);
 		LLVMValueRef value = gencontext_emit_binary(context, expr, addr, base_op);
-		llvm_store_expand_self_aligned(context, addr, value, expr->binary_expr.left->type);
+		llvm_store_self_aligned(context, addr, value, expr->binary_expr.left->type);
 		return value;
 	}
 	if (binary_op == BINARYOP_ASSIGN)
@@ -1572,7 +1589,7 @@ static LLVMValueRef gencontext_emit_binary_expr(GenContext *context, Expr *expr)
 	return gencontext_emit_binary(context, expr, NULL, binary_op);
 }
 
-LLVMValueRef gencontext_emit_elvis_expr(GenContext *context, Expr *expr)
+void gencontext_emit_elvis_expr(GenContext *context, BEValue *value, Expr *expr)
 {
 	LLVMBasicBlockRef current_block = context->current_block;
 	LLVMBasicBlockRef phi_block = LLVMCreateBasicBlockInContext(context->context, "cond.phi");
@@ -1604,12 +1621,12 @@ LLVMValueRef gencontext_emit_elvis_expr(GenContext *context, Expr *expr)
 	LLVMBasicBlockRef blocks[2] = { current_block, end_block };
 	LLVMAddIncoming(phi, logic_values, blocks, 2);
 
-	return phi;
+	bevalue_from_value(value, phi, expr->type);
 }
 
-LLVMValueRef gencontext_emit_ternary_expr(GenContext *context, Expr *expr)
+void gencontext_emit_ternary_expr(GenContext *context, BEValue *value, Expr *expr)
 {
-	if (expr->ternary_expr.then_expr == NULL) return gencontext_emit_elvis_expr(context, expr);
+	if (expr->ternary_expr.then_expr == NULL) return gencontext_emit_elvis_expr(context, value, expr);
 
 	// Set up basic blocks, following Cone
 	LLVMBasicBlockRef phi_block = LLVMCreateBasicBlockInContext(context->context, "cond.phi");
@@ -1619,7 +1636,7 @@ LLVMValueRef gencontext_emit_ternary_expr(GenContext *context, Expr *expr)
 	// Generate condition and conditional branch
 	LLVMValueRef cond = gencontext_emit_expr(context, expr->ternary_expr.cond);
 
-	gencontext_emit_cond_br(context, cond, lhs_block, rhs_block);
+	gencontext_emit_trunc_cond_br(context, cond, lhs_block, rhs_block);
 
 	gencontext_emit_block(context, lhs_block);
 	LLVMValueRef lhs = gencontext_emit_expr(context, expr->ternary_expr.then_expr);
@@ -1635,22 +1652,22 @@ LLVMValueRef gencontext_emit_ternary_expr(GenContext *context, Expr *expr)
 	gencontext_emit_block(context, phi_block);
 	if (!rhs_exit)
 	{
-		return lhs;
+		return bevalue_from_value(value, lhs, expr->type);
 	}
 	if (!lhs_exit)
 	{
-		return rhs;
+		return bevalue_from_value(value, rhs, expr->type);
 	}
 	LLVMValueRef phi = LLVMBuildPhi(context->builder, llvm_type(expr->type), "val");
 	LLVMValueRef logic_values[2] = { lhs, rhs };
 	LLVMBasicBlockRef blocks[2] = { lhs_exit, rhs_exit };
 	LLVMAddIncoming(phi, logic_values, blocks, 2);
 
-	return phi;
+	bevalue_from_value(value, rhs, expr->type);
 }
 
 
-LLVMValueRef gencontext_emit_const_expr(GenContext *context, Expr *expr)
+static void gencontext_emit_const_expr(GenContext *context, BEValue *be_value, Expr *expr)
 {
 	Type *type = type_reduced_from_expr(expr)->canonical;
 	switch (expr->const_expr.kind)
@@ -1658,18 +1675,22 @@ LLVMValueRef gencontext_emit_const_expr(GenContext *context, Expr *expr)
 		case ALL_INTS:
 			if (type_is_unsigned(type))
 			{
-				return llvm_int(type, bigint_as_unsigned(&expr->const_expr.i));
+				bevalue_from_value(be_value, llvm_int(type, bigint_as_unsigned(&expr->const_expr.i)), type);
 			}
 			else
 			{
-				return llvm_int(type, bigint_as_signed(&expr->const_expr.i));
+				bevalue_from_value(be_value, llvm_int(type, bigint_as_signed(&expr->const_expr.i)), type);
 			}
+			return;
 		case ALL_FLOATS:
-			return LLVMConstReal(llvm_type(type), (double) expr->const_expr.f);
+			bevalue_from_value(be_value, LLVMConstReal(llvm_type(type), (double) expr->const_expr.f), type);
+			return;
 		case TYPE_POINTER:
-			return LLVMConstNull(llvm_type(type));
+			bevalue_from_value(be_value, LLVMConstNull(llvm_type(type)), type);
+			return;
 		case TYPE_BOOL:
-			return llvm_int(type, expr->const_expr.b ? 1 : 0);
+			bevalue_from_boolean(be_value, LLVMConstInt(context->bool_type, expr->const_expr.b ? 1 : 0, 0));
+			return;
 		case TYPE_STRING:
 		{
 			LLVMValueRef global_name = LLVMAddGlobal(context->module, LLVMArrayType(llvm_type(type_char), expr->const_expr.string.len + 1), "");
@@ -1679,7 +1700,8 @@ LLVMValueRef gencontext_emit_const_expr(GenContext *context, Expr *expr)
 			                                                         expr->const_expr.string.chars,
 			                                                         expr->const_expr.string.len,
 			                                                         0));
-			return global_name;
+			bevalue_from_value(be_value, global_name, type);
+			return;
 		}
 		case TYPE_ERRTYPE:
 			TODO
@@ -1764,7 +1786,7 @@ static void gencontext_expand_type_to_args(GenContext *context, Type *param_type
 	}
 }
 
-LLVMValueRef gencontext_emit_call_expr(GenContext *context, Expr *expr)
+void gencontext_emit_call_expr(GenContext *context, BEValue *be_value, Expr *expr)
 {
 	FunctionSignature *signature;
 	LLVMValueRef func;
@@ -1972,7 +1994,7 @@ LLVMValueRef gencontext_emit_call_expr(GenContext *context, Expr *expr)
 	{
 		LLVMSetFunctionCallConv(call, LLVMX86StdcallCallConv);
 	}*/
-	return call;
+	bevalue_from_value(be_value, call, expr->type);
 
 }
 
@@ -2105,7 +2127,7 @@ LLVMValueRef gencontext_emit_assign_expr(GenContext *context, LLVMValueRef ref, 
 		context->catch_block = assign_block;
 	}
 	LLVMValueRef value = gencontext_emit_expr(context, expr);
-	llvm_store_expand_self_aligned(context, ref, value, expr->type);
+	llvm_store_self_aligned(context, ref, value, expr->type);
 
 	if (failable_ref)
 	{
@@ -2126,7 +2148,6 @@ LLVMValueRef gencontext_emit_assign_expr(GenContext *context, LLVMValueRef ref, 
 
 static inline LLVMValueRef gencontext_emit_identifier_rvalue(GenContext *context, Decl *decl)
 {
-
 	if (decl->decl_kind != DECL_VAR || !decl->var.failable)
 	{
 		return gencontext_emit_load(context, decl->type, decl_ref(decl));
@@ -2171,6 +2192,7 @@ static inline LLVMValueRef gencontext_emit_failable(GenContext *context, Expr *e
 
 LLVMValueRef gencontext_emit_expr(GenContext *context, Expr *expr)
 {
+	BEValue value;
 NESTED_RETRY:
 	switch (expr->expr_kind)
 	{
@@ -2191,11 +2213,14 @@ NESTED_RETRY:
 			// Should only appear when generating designated initializers.
 			UNREACHABLE
 		case EXPR_SLICE_ASSIGN:
-			return gencontext_emit_slice_assign(context, expr);
+			gencontext_emit_slice_assign(context, &value, expr);
+			goto RETURN_BE_VALUE;
 		case EXPR_SLICE:
-			return gencontext_emit_slice(context, expr);
+			gencontext_emit_slice(context, &value, expr);
+			goto RETURN_BE_VALUE;
 		case EXPR_LEN:
-			return gencontext_emit_len(context, expr);
+			gencontext_emit_len(context, &value, expr);
+			goto RETURN_BE_VALUE;
 		case EXPR_FAILABLE:
 			return gencontext_emit_failable(context, expr);
 		case EXPR_TRY:
@@ -2213,21 +2238,27 @@ NESTED_RETRY:
 		case EXPR_EXPR_BLOCK:
 			return gencontext_emit_expr_block(context, expr);
 		case EXPR_SCOPED_EXPR:
-			return gencontext_emit_scoped_expr(context, expr);
+			gencontext_emit_scoped_expr(context, &value, expr);
+			goto RETURN_BE_VALUE;
 		case EXPR_UNARY:
-			return gencontext_emit_unary_expr(context, expr);
+			gencontext_emit_unary_expr(context, &value, expr);
+			goto RETURN_BE_VALUE;
 		case EXPR_CONST:
-			return gencontext_emit_const_expr(context, expr);
+			gencontext_emit_const_expr(context, &value, expr);
+			goto RETURN_BE_VALUE;
 		case EXPR_BINARY:
 			return gencontext_emit_binary_expr(context, expr);
 		case EXPR_TERNARY:
-			return gencontext_emit_ternary_expr(context, expr);
+			gencontext_emit_ternary_expr(context, &value, expr);
+			goto RETURN_BE_VALUE;
 		case EXPR_POST_UNARY:
-			return gencontext_emit_post_unary_expr(context, expr);
+			gencontext_emit_post_unary_expr(context, &value, expr);
+			goto RETURN_BE_VALUE;
 		case EXPR_GUARD:
 			return gencontext_emit_guard_expr(context, expr);
 		case EXPR_TYPEID:
-			return gencontext_emit_typeid(context, expr);
+			gencontext_emit_typeid(context, &value, expr);
+			goto RETURN_BE_VALUE;
 		case EXPR_TYPEOF:
 			// These are folded in the semantic analysis step.
 			UNREACHABLE
@@ -2239,7 +2270,8 @@ NESTED_RETRY:
 		case EXPR_ACCESS:
 			return gencontext_emit_load(context, expr->type, gencontext_emit_address(context, expr));
 		case EXPR_CALL:
-			return gencontext_emit_call_expr(context, expr);
+			gencontext_emit_call_expr(context, &value, expr);
+			goto RETURN_BE_VALUE;
 		case EXPR_GROUP:
 			expr = expr->group_expr;
 			goto NESTED_RETRY;
@@ -2249,4 +2281,8 @@ NESTED_RETRY:
 			return gencontext_emit_cast_expr(context, expr);
 	}
 	UNREACHABLE
+RETURN_BE_VALUE:
+	bevalue_to_value(context, &value);
+	return value.value;
+
 }

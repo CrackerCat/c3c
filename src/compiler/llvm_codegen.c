@@ -315,6 +315,52 @@ static inline uint32_t upper_power_of_two(uint32_t v)
 	return v;
 }
 
+void bevalue_from_boolean(BEValue *value, LLVMValueRef llvm_value)
+{
+	value->value = llvm_value;
+	value->alignment = type_abi_alignment(type_bool);
+	value->kind = BE_BOOLEAN;
+	value->type = type_bool;
+}
+
+void bevalue_from_value(BEValue *value, LLVMValueRef llvm_value, Type *type)
+{
+	value->value = llvm_value;
+	value->alignment = type_abi_alignment(type);
+	value->kind = BE_VALUE;
+	value->type = type;
+}
+
+void bevalue_from_address(BEValue *value, LLVMValueRef llvm_value, Type *type)
+{
+	value->value = llvm_value;
+	value->alignment = type_abi_alignment(type);
+	value->kind = BE_ADDRESS;
+	value->type = type;
+}
+
+void bevalue_to_store(GenContext *context, BEValue *value)
+{
+	if (value->type->type_kind == TYPE_BOOL)
+	{
+		value->value = LLVMBuildZExt(context->builder, value->value, context->byte_type, "");
+	}
+	value->kind = BE_VALUE;
+}
+
+void bevalue_to_value(GenContext *context, BEValue *value)
+{
+	if (value->kind != BE_ADDRESS) return;
+	value->value = gencontext_emit_load_aligned(context, llvm_type(value->type), value->value, value->alignment ?: type_abi_alignment(value->type), "");
+	if (value->type->type_kind == TYPE_BOOL)
+	{
+		value->value = LLVMBuildTrunc(context->builder, value->value, context->bool_type, "");
+		value->kind = BE_BOOLEAN;
+		return;
+	}
+	value->kind = BE_VALUE;
+}
+
 
 static void gencontext_emit_decl(GenContext *context, Decl *decl)
 {
@@ -475,7 +521,7 @@ unsigned llvm_abi_alignment(LLVMTypeRef type)
 	return LLVMABIAlignmentOfType(target_data_layout(), type);
 }
 
-void llvm_store_expand_self_aligned(GenContext *context, LLVMValueRef pointer, LLVMValueRef value, Type *type)
+void llvm_store_self_aligned(GenContext *context, LLVMValueRef pointer, LLVMValueRef value, Type *type)
 {
 	llvm_store_aligned(context, pointer, value, type_abi_alignment(type));
 }

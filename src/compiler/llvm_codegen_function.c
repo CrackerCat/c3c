@@ -275,6 +275,7 @@ void gencontext_emit_return_abi(GenContext *context, LLVMValueRef return_value, 
 		return_out = context->failable_out;
 		return_type = type_error;
 		return_value = failable;
+		info = signature->failable_abi_info;
 	}
 
 	switch (info->kind)
@@ -391,7 +392,20 @@ void gencontext_emit_function_body(GenContext *context, Decl *decl)
 	FunctionSignature *signature = &decl->func.function_signature;
 	unsigned arg = 0;
 
-	if (signature->ret_abi_info->kind == ABI_ARG_INDIRECT)
+	if (emit_debug)
+	{
+		gencontext_push_debug_scope(context, context->debug.function);
+	}
+
+	if (signature->failable && signature->failable_abi_info->kind == ABI_ARG_INDIRECT)
+	{
+		context->failable_out = LLVMGetParam(context->function, arg++);
+	}
+	else
+	{
+		context->failable_out = NULL;
+	}
+	if (signature->ret_abi_info && signature->ret_abi_info->kind == ABI_ARG_INDIRECT)
 	{
 		context->return_out = LLVMGetParam(context->function, arg++);
 	}
@@ -400,10 +414,6 @@ void gencontext_emit_function_body(GenContext *context, Decl *decl)
 		context->return_out = NULL;
 	}
 
-	if (emit_debug)
-	{
-		gencontext_push_debug_scope(context, context->debug.function);
-	}
 
 	// Generate LLVMValueRef's for all parameters, so we can use them as local vars in code
 	VECEACH(decl->func.function_signature.params, i)

@@ -247,7 +247,7 @@ void gencontext_emit_if(GenContext *context, Ast *ast)
 	}
 	else
 	{
-		gencontext_emit_cond_br(context, value, then_block, else_block);
+		gencontext_emit_trunc_cond_br(context, value, then_block, else_block);
 	}
 
 	POP_ERROR();
@@ -847,10 +847,13 @@ static inline void gencontext_emit_assume(GenContext *context, Expr *expr)
 	if (expr->pure)
 	{
 		LLVMValueRef value = gencontext_emit_expr(context, expr);
+		value = LLVMBuildTrunc(context->builder, value, context->bool_type, "");
 		gencontext_emit_call_intrinsic(context, assume_intrinsic_id, NULL, 0, &value, 1);
 	}
-
 }
+
+
+
 static inline void gencontext_emit_assert_stmt(GenContext *context, Ast *ast)
 {
 	if (build_options.debug_mode)

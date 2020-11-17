@@ -225,6 +225,10 @@ static inline bool abi_info_should_flatten(ABIArgInfo *info)
 	return info->kind == ABI_ARG_DIRECT_COERCE && info->direct_coerce.elements > 1U && !info->direct_coerce.prevent_flatten;
 }
 
+void bevalue_from_boolean(BEValue *value, LLVMValueRef llvm_value);
+void bevalue_from_value(BEValue *value, LLVMValueRef llvm_value, Type *type);
+void bevalue_from_address(BEValue *value, LLVMValueRef llvm_value, Type *type);
+void bevalue_to_value(GenContext *context, BEValue *value);
 void gencontext_add_attribute_range(GenContext *context, LLVMValueRef value_to_add_attribute_to, unsigned attribute_id, int index_start, int index_end);
 void gencontext_add_attribute(GenContext *context, LLVMValueRef value_to_add_attribute_to, unsigned attribute_id, int index);
 void gencontext_add_string_attribute(GenContext *context, LLVMValueRef value_to_add_attribute_to, const char *attribute, const char *value, int index);
@@ -293,7 +297,7 @@ static inline LLVMBasicBlockRef gencontext_current_block_if_in_use(GenContext *c
 
 unsigned llvm_abi_size(LLVMTypeRef type);
 unsigned llvm_abi_alignment(LLVMTypeRef type);
-void llvm_store_expand_self_aligned(GenContext *context, LLVMValueRef pointer, LLVMValueRef value, Type *type);
+void llvm_store_self_aligned(GenContext *context, LLVMValueRef pointer, LLVMValueRef value, Type *type);
 void llvm_store_aligned(GenContext *context, LLVMValueRef pointer, LLVMValueRef value, unsigned alignment);
 void llvm_store_aligned_decl(GenContext *context, Decl *decl, LLVMValueRef value);
 void llvm_memcpy_to_decl(GenContext *context, Decl *decl, LLVMValueRef source, unsigned source_alignment);
@@ -445,4 +449,3 @@ static inline LLVMValueRef gencontext_emit_const_int(GenContext *context, Type *
 }
 
 #define llvm_int(_type, _val) gencontext_emit_const_int(context, _type, _val)
-LLVMValueRef gencontext_emit_typeid(GenContext *context, Expr *expr);
