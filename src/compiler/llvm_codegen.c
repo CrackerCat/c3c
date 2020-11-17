@@ -33,6 +33,8 @@ static void gencontext_init(GenContext *context, Context *ast_context)
 {
 	memset(context, 0, sizeof(GenContext));
 	context->context = LLVMContextCreate();
+	context->bool_type = LLVMInt1TypeInContext(context->context);
+	context->byte_type = LLVMInt8TypeInContext(context->context);
 	LLVMContextSetDiagnosticHandler(context->context, &diagnostics_handler, context);
 	context->ast_context = ast_context;
 }
@@ -158,7 +160,7 @@ LLVMValueRef gencontext_emit_alloca(GenContext *context, LLVMTypeRef type, unsig
 {
 	LLVMBasicBlockRef current_block = LLVMGetInsertBlock(context->builder);
 	LLVMPositionBuilderBefore(context->builder, context->alloca_point);
-	LLVMValueRef alloca = LLVMBuildAlloca(context->builder, llvm_type_for_mem(context, type), name);
+	LLVMValueRef alloca = LLVMBuildAlloca(context->builder, type, name);
 	LLVMSetAlignment(alloca, alignment ?: llvm_abi_alignment(type));
 	LLVMPositionBuilderAtEnd(context->builder, current_block);
 	return alloca;
@@ -166,14 +168,14 @@ LLVMValueRef gencontext_emit_alloca(GenContext *context, LLVMTypeRef type, unsig
 
 LLVMValueRef gencontext_emit_alloca_aligned(GenContext *context, Type *type, const char *name)
 {
-	return gencontext_emit_alloca(context, llvm_type_for_mem(context, llvm_type(type)), type_alloca_alignment(type), name);
+	return gencontext_emit_alloca(context, llvm_type(type), type_alloca_alignment(type), name);
 }
 
 LLVMValueRef gencontext_emit_decl_alloca(GenContext *context, Decl *decl)
 {
 	LLVMTypeRef type = llvm_type(decl->type);
 	return gencontext_emit_alloca(context,
-							   llvm_type_for_mem(context, type),
+							   type,
 							   decl->alignment ?: type_alloca_alignment(decl->type),
 							   decl->name ?: "anon");
 }
@@ -462,11 +464,6 @@ void gencontext_add_string_attribute(GenContext *context, LLVMValueRef value_to_
 
 
 
-LLVMTypeRef llvm_type_for_mem(GenContext *context, LLVMTypeRef type)
-{
-	if (LLVMInt1TypeInContext(context->context) == type) return LLVMInt8TypeInContext(context->context);
-	return type;
-}
 
 unsigned llvm_abi_size(LLVMTypeRef type)
 {
@@ -476,6 +473,11 @@ unsigned llvm_abi_size(LLVMTypeRef type)
 unsigned llvm_abi_alignment(LLVMTypeRef type)
 {
 	return LLVMABIAlignmentOfType(target_data_layout(), type);
+}
+
+void llvm_store_expand_self_aligned(GenContext *context, LLVMValueRef pointer, LLVMValueRef value, Type *type)
+{
+	llvm_store_aligned(context, pointer, value, type_abi_alignment(type));
 }
 
 void llvm_store_aligned(GenContext *context, LLVMValueRef pointer, LLVMValueRef value, unsigned alignment)

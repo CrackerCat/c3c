@@ -42,8 +42,7 @@ ABIArgInfo *win64_classify(GenContext *context, Type *type, bool is_return, bool
 			}
 			if (is_return)
 			{
-				TODO // This looks insane.
-				return abi_arg_new(ABI_ARG_EXPAND);
+				return abi_arg_new(ABI_ARG_INDIRECT);
 			}
 			// HVAs are handled later.
 			if (!type_is_builtin(type->type_kind) && type->type_kind != TYPE_VECTOR)
@@ -93,8 +92,7 @@ ABIArgInfo *win64_reclassify_hva_arg(GenContext *context, Type *type, ABIArgInfo
 	Type *base = NULL;
 	unsigned elements = 0;
 	type = type_lowering(type);
-	if (!type_is_builtin(type->type_kind) && type->type_kind != TYPE_VECTOR &&
-	type_is_homogenous_aggregate(type, &base, &elements))
+	if (!type_is_builtin(type->type_kind) && type->type_kind != TYPE_VECTOR && type_is_homogenous_aggregate(type, &base, &elements))
 	{
 		if (context->abi.sse_registers >= elements)
 		{

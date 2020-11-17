@@ -283,8 +283,9 @@ LLVMValueRef gencontext_emit_address(GenContext *context, Expr *expr)
 		{
 			Type *return_type = expr->call_expr.function->type->func.signature->rtype->type;
 			LLVMValueRef temp = gencontext_emit_alloca_aligned(context, return_type, "callresult");
+			assert(return_type->canonical->type_kind != TYPE_BOOL);
 			LLVMValueRef result = gencontext_emit_expr(context, expr);
-			LLVMBuildStore(context->builder, result, temp);
+			llvm_store_expand_self_aligned(context, temp, result, return_type);
 			return temp;
 		}
 		case EXPR_CONST:
@@ -611,7 +612,7 @@ static inline LLVMValueRef gencontext_emit_initializer_list_expr_addr(GenContext
 			Expr *element = elements[i];
 			LLVMValueRef init_value = gencontext_emit_expr(context, element);
 			LLVMValueRef subref = LLVMBuildStructGEP2(context->builder, type, ref, i + (int)is_error, "");
-			LLVMBuildStore(context->builder, init_value, subref);
+			llvm_store_expand_self_aligned(context, subref, init_value, element->type);
 		}
 		return ref;
 	}
@@ -1057,11 +1058,11 @@ static LLVMValueRef gencontext_emit_logical_and_or(GenContext *context, Expr *ex
 
 	if (op == BINARYOP_AND)
 	{
-		gencontext_emit_cond_br(context, lhs, rhs_block, phi_block);
+		gencontext_emit_trunc_cond_br(context, lhs, rhs_block, phi_block);
 	}
 	else
 	{
-		gencontext_emit_cond_br(context, lhs, phi_block, rhs_block);
+		gencontext_emit_trunc_cond_br(context, lhs, phi_block, rhs_block);
 	}
 
 	gencontext_emit_block(context, rhs_block);
@@ -1238,7 +1239,7 @@ static LLVMValueRef gencontext_emit_binary(GenContext *context, Expr *expr, LLVM
 	Type *lhs_type = type_reduced_from_expr(lhs);
 	if (type_is_integer(lhs_type) && binary_op >= BINARYOP_GT && binary_op <= BINARYOP_EQ)
 	{
-		return gencontext_emit_int_comparison(context, lhs_type, type_reduced_from_expr(rhs), lhs_value, rhs_value, binary_op);
+		return LLVMBuildZExt(context->builder, gencontext_emit_int_comparison(context, lhs_type, type_reduced_from_expr(rhs), lhs_value, rhs_value, binary_op), context->byte_type, "");
 	}
 	bool is_float = type_is_float(lhs_type);
 	switch (binary_op)
@@ -1333,19 +1334,19 @@ static LLVMValueRef gencontext_emit_binary(GenContext *context, Expr *expr, LLVM
 		case BINARYOP_NE:
 			// Unordered?
 			assert(type_is_float(lhs_type));
-			return LLVMBuildFCmp(context->builder, LLVMRealUNE, lhs_value, rhs_value, "neq");
+			return LLVMBuildZExt(context->builder, LLVMBuildFCmp(context->builder, LLVMRealUNE, lhs_value, rhs_value, "neq"), context->byte_type, "");
 		case BINARYOP_GE:
 			assert(type_is_float(lhs_type));
-			return LLVMBuildFCmp(context->builder, LLVMRealUGE, lhs_value, rhs_value, "ge");
+			return LLVMBuildZExt(context->builder, LLVMBuildFCmp(context->builder, LLVMRealUGE, lhs_value, rhs_value, "ge"), context->byte_type, "");
 		case BINARYOP_GT:
 			assert(type_is_float(lhs_type));
-			return LLVMBuildFCmp(context->builder, LLVMRealUGT, lhs_value, rhs_value, "gt");
+			return LLVMBuildZExt(context->builder, LLVMBuildFCmp(context->builder, LLVMRealUGT, lhs_value, rhs_value, "gt"), context->byte_type, "");
 		case BINARYOP_LE:
 			assert(type_is_float(lhs_type));
-			return LLVMBuildFCmp(context->builder, LLVMRealULE, lhs_value, rhs_value, "le");
+			return LLVMBuildZExt(context->builder, LLVMBuildFCmp(context->builder, LLVMRealULE, lhs_value, rhs_value, "le"), context->byte_type, "");
 		case BINARYOP_LT:
 			assert(type_is_float(lhs_type));
-			return LLVMBuildFCmp(context->builder, LLVMRealULE, lhs_value, rhs_value, "lt");
+			return LLVMBuildZExt(context->builder, LLVMBuildFCmp(context->builder, LLVMRealULT, lhs_value, rhs_value, "lt"), context->byte_type, "");
 		case BINARYOP_AND:
 		case BINARYOP_OR:
 		case BINARYOP_ASSIGN:
@@ -1555,7 +1556,7 @@ static LLVMValueRef gencontext_emit_binary_expr(GenContext *context, Expr *expr)
 		assert(base_op != BINARYOP_ERROR);
 		LLVMValueRef addr = gencontext_emit_address(context, expr->binary_expr.left);
 		LLVMValueRef value = gencontext_emit_binary(context, expr, addr, base_op);
-		LLVMBuildStore(context->builder, value, addr);
+		llvm_store_expand_self_aligned(context, addr, value, expr->binary_expr.left->type);
 		return value;
 	}
 	if (binary_op == BINARYOP_ASSIGN)
@@ -1586,8 +1587,7 @@ LLVMValueRef gencontext_emit_elvis_expr(GenContext *context, Expr *expr)
 		CastKind cast = cast_to_bool_kind(cond_type);
 		cond = gencontext_emit_cast(context, cast, cond, cond_type, type_bool);
 	}
-
-	gencontext_emit_cond_br(context, cond, phi_block, rhs_block);
+	gencontext_emit_trunc_cond_br(context, cond, phi_block, rhs_block);
 
 	gencontext_emit_block(context, rhs_block);
 	LLVMValueRef rhs = gencontext_emit_expr(context, expr->ternary_expr.else_expr);
@@ -2105,11 +2105,12 @@ LLVMValueRef gencontext_emit_assign_expr(GenContext *context, LLVMValueRef ref, 
 		context->catch_block = assign_block;
 	}
 	LLVMValueRef value = gencontext_emit_expr(context, expr);
-	LLVMBuildStore(context->builder, value, ref);
+	llvm_store_expand_self_aligned(context, ref, value, expr->type);
 
 	if (failable_ref)
 	{
-		LLVMBuildStore(context->builder, gencontext_emit_no_error_union(context), failable_ref);
+		TODO
+		llvm_store_aligned(context, failable_ref, gencontext_emit_no_error_union(context), 0);
 	}
 	POP_ERROR();
 

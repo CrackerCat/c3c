@@ -106,14 +106,12 @@ static inline LLVMTypeRef llvm_type_from_decl(GenContext *context, Decl *decl)
 }
 static inline LLVMTypeRef llvm_type_from_ptr(GenContext *context, Type *type)
 {
-	LLVMTypeRef base_llvm_type = llvm_get_type(context, type->pointer);
-
 	if (type->canonical != type)
 	{
 		return type->backend_type = llvm_get_type(context, type->canonical);
 	}
 
-	return type->backend_type = LLVMPointerType(base_llvm_type, /** TODO **/0);
+	return type->backend_type = LLVMPointerType(llvm_get_type(context, type->pointer), /** TODO **/0);
 }
 
 static inline LLVMTypeRef llvm_type_from_array(GenContext *context, Type *type)
@@ -123,8 +121,7 @@ static inline LLVMTypeRef llvm_type_from_array(GenContext *context, Type *type)
 		return type->backend_type = llvm_get_type(context, type->canonical);
 	}
 
-	LLVMTypeRef base_llvm_type = llvm_get_type(context, type->array.base);
-	return type->backend_type = LLVMArrayType(base_llvm_type, type->array.len);
+	return type->backend_type = LLVMArrayType(llvm_get_type(context, type->array.base), type->array.len);
 }
 
 
@@ -284,6 +281,7 @@ LLVMTypeRef llvm_func_type(GenContext *context, Type *type)
 }
 
 
+
 LLVMTypeRef llvm_get_type(GenContext *context, Type *any_type)
 {
 	if (any_type->backend_type && LLVMGetTypeContext(any_type->backend_type) == context->context)
@@ -331,8 +329,7 @@ LLVMTypeRef llvm_get_type(GenContext *context, Type *any_type)
 		case TYPE_IXX:
 			return any_type->backend_type = LLVMIntTypeInContext(context->context, 32U);
 		case TYPE_BOOL:
-			// TODO
-			return any_type->backend_type = LLVMIntTypeInContext(context->context, 1U);
+			return any_type->backend_type = LLVMIntTypeInContext(context->context, 8U);
 		case TYPE_POINTER:
 			return any_type->backend_type = llvm_type_from_ptr(context, any_type);
 		case TYPE_STRING:
@@ -352,7 +349,7 @@ LLVMTypeRef llvm_get_type(GenContext *context, Type *any_type)
 		case TYPE_VARARRAY:
 			return any_type->backend_type = llvm_get_type(context, type_get_ptr(any_type->array.base));
 		case TYPE_VECTOR:
-			return any_type->backend_type = LLVMVectorType(llvm_type(any_type->vector.base), any_type->vector.len);
+			return any_type->backend_type = LLVMVectorType(llvm_get_type(context, any_type->vector.base), any_type->vector.len);
 		case TYPE_COMPLEX:
 		{
 			return any_type->backend_type = gencontext_get_twostruct(context, llvm_type(any_type->complex), llvm_type(any_type->complex));
@@ -360,6 +357,7 @@ LLVMTypeRef llvm_get_type(GenContext *context, Type *any_type)
 	}
 	UNREACHABLE;
 }
+
 
 LLVMTypeRef gencontext_get_twostruct_abi_type(GenContext *context, AbiType *lo, AbiType *hi)
 {

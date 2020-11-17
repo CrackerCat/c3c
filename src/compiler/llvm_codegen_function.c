@@ -52,13 +52,19 @@ void gencontext_emit_br(GenContext *context, LLVMBasicBlockRef next_block)
 
 
 
-void gencontext_emit_cond_br(GenContext *context, LLVMValueRef value, LLVMBasicBlockRef thenBlock, LLVMBasicBlockRef elseBlock)
+void gencontext_emit_cond_br(GenContext *context, LLVMValueRef value, LLVMBasicBlockRef then_block, LLVMBasicBlockRef else_block)
 {
 	assert(context->current_block);
-	LLVMBuildCondBr(context->builder, value, thenBlock, elseBlock);
+	LLVMBuildCondBr(context->builder, value, then_block, else_block);
 	LLVMClearInsertionPosition(context->builder);
 	context->current_block = NULL;
 	context->current_block_is_target = false;
+}
+
+void gencontext_emit_trunc_cond_br(GenContext *context, LLVMValueRef value, LLVMBasicBlockRef then_block, LLVMBasicBlockRef else_block)
+{
+	value = LLVMBuildTrunc(context->builder, value, context->bool_type, "");
+	gencontext_emit_cond_br(context, value, then_block, else_block);
 }
 
 

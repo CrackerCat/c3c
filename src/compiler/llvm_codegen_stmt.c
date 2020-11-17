@@ -314,12 +314,12 @@ void gencontext_emit_for_stmt(GenContext *context, Ast *ast)
 		// If we have a body, conditionally jump to it.
 		if (body_block)
 		{
-			gencontext_emit_cond_br(context, value, body_block, exit_block);
+			gencontext_emit_trunc_cond_br(context, value, body_block, exit_block);
 		}
 		else
 		{
 			// Otherwise jump to inc or cond depending on what's available.
-			gencontext_emit_cond_br(context, value, inc_block ? inc_block : cond_block, exit_block);
+			gencontext_emit_trunc_cond_br(context, value, inc_block ? inc_block : cond_block, exit_block);
 		}
 	}
 
@@ -390,7 +390,7 @@ void gencontext_emit_while_stmt(GenContext *context, Ast *ast)
 	// If we have a body, conditionally jump to it.
 	if (body_block)
 	{
-		gencontext_emit_cond_br(context, value, body_block, exit_block);
+		gencontext_emit_trunc_cond_br(context, value, body_block, exit_block);
 	}
 	else
 	{
@@ -398,7 +398,7 @@ void gencontext_emit_while_stmt(GenContext *context, Ast *ast)
 		gencontext_emit_defer(context, defers.start, defers.end);
 
 		// Otherwise jump to inc or cond depending on what's available.
-		gencontext_emit_cond_br(context, value, begin_block, exit_block);
+		gencontext_emit_trunc_cond_br(context, value, begin_block, exit_block);
 	}
 
 	if (body_block)
@@ -454,7 +454,7 @@ void gencontext_emit_do_stmt(GenContext *context, Ast *ast)
 		}
 		else
 		{
-			gencontext_emit_cond_br(context, value, body_block, exit_block);
+			gencontext_emit_trunc_cond_br(context, value, body_block, exit_block);
 		}
 	}
 	else
@@ -858,7 +858,7 @@ static inline void gencontext_emit_assert_stmt(GenContext *context, Ast *ast)
 		LLVMValueRef value = gencontext_emit_expr(context, ast->assert_stmt.expr);
 		LLVMBasicBlockRef on_fail = gencontext_create_free_block(context, "assert_fail");
 		LLVMBasicBlockRef on_ok = gencontext_create_free_block(context, "assert_ok");
-		gencontext_emit_cond_br(context, value, on_fail, on_ok);
+		gencontext_emit_trunc_cond_br(context, value, on_fail, on_ok);
 		gencontext_emit_block(context, on_fail);
 		// TODO emit message
 		gencontext_emit_call_intrinsic(context, trap_intrinsic_id, NULL, 0, NULL, 0);

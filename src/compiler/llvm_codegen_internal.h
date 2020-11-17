@@ -21,6 +21,21 @@
 #include <llvm-c/Comdat.h>
 #include "dwarf.h"
 
+typedef enum
+{
+	BE_VALUE,
+	BE_ADDRESS,
+	BE_BOOLEAN,
+} BackendValueKind;
+
+typedef struct
+{
+	BackendValueKind kind : 5;
+	unsigned alignment : 16;
+	Type *type;
+	LLVMValueRef value;
+} BEValue;
+
 typedef struct
 {
 	LLVMBasicBlockRef continue_block;
@@ -133,7 +148,8 @@ typedef struct
 	LLVMBasicBlockRef current_block;
 	LLVMBasicBlockRef catch_block;
 	LLVMValueRef error_var;
-
+	LLVMTypeRef bool_type;
+	LLVMTypeRef byte_type;
 	Decl *cur_code_decl;
 	Decl *cur_func_decl;
 	TypeInfo *current_return_type;
@@ -222,6 +238,7 @@ gencontext_emit_call_intrinsic(GenContext *context, unsigned intrinsic_id, LLVMT
 void gencontext_emit_panic_on_true(GenContext *context, LLVMValueRef value, const char *panic_name);
 void gencontext_emit_defer(GenContext *context, AstId defer_start, AstId defer_end);
 
+LLVMValueRef gencontext_emit_expand_bool_if_needed(GenContext *context, LLVMValueRef value, Type *type);
 LLVMValueRef gencontext_emit_expr(GenContext *context, Expr *expr);
 LLVMValueRef gencontext_emit_assign_expr(GenContext *context, LLVMValueRef ref, Expr *expr, LLVMValueRef failable);
 LLVMMetadataRef gencontext_get_debug_type(GenContext *context, Type *type);
@@ -242,7 +259,8 @@ LLVMValueRef gencontext_emit_memclear(GenContext *context, LLVMValueRef ref, Typ
 
 void gencontext_emit_br(GenContext *context, LLVMBasicBlockRef next_block);
 bool gencontext_check_block_branch_emit(GenContext *context);
-void gencontext_emit_cond_br(GenContext *context, LLVMValueRef value, LLVMBasicBlockRef thenBlock, LLVMBasicBlockRef elseBlock);
+void gencontext_emit_cond_br(GenContext *context, LLVMValueRef value, LLVMBasicBlockRef then_block, LLVMBasicBlockRef else_block);
+void gencontext_emit_trunc_cond_br(GenContext *context, LLVMValueRef value, LLVMBasicBlockRef then_block, LLVMBasicBlockRef else_block);
 static inline LLVMBasicBlockRef gencontext_create_free_block(GenContext *context, const char *name)
 {
 	return LLVMCreateBasicBlockInContext(context->context, name);
@@ -275,12 +293,12 @@ static inline LLVMBasicBlockRef gencontext_current_block_if_in_use(GenContext *c
 
 unsigned llvm_abi_size(LLVMTypeRef type);
 unsigned llvm_abi_alignment(LLVMTypeRef type);
+void llvm_store_expand_self_aligned(GenContext *context, LLVMValueRef pointer, LLVMValueRef value, Type *type);
 void llvm_store_aligned(GenContext *context, LLVMValueRef pointer, LLVMValueRef value, unsigned alignment);
 void llvm_store_aligned_decl(GenContext *context, Decl *decl, LLVMValueRef value);
 void llvm_memcpy_to_decl(GenContext *context, Decl *decl, LLVMValueRef source, unsigned source_alignment);
 LLVMValueRef gencontext_emit_load_aligned(GenContext *context, LLVMTypeRef type, LLVMValueRef pointer, unsigned alignment, const char *name);
 unsigned llvm_store_size(LLVMTypeRef type);
-LLVMTypeRef llvm_type_for_mem(GenContext *context, LLVMTypeRef type);
 void gencontext_emit_function_body(GenContext *context, Decl *decl);
 void gencontext_emit_implicit_return(GenContext *context);
 void gencontext_emit_return_abi(GenContext *context, LLVMValueRef return_value, LLVMValueRef failable);
